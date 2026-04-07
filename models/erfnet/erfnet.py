@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
+from pathlib import Path
 
 class DownsamplerBlock (nn.Module):
     def __init__(self, ninput, noutput):
@@ -146,7 +147,8 @@ class ERFNet(nn.Module):
     def __init__(self, heads):
         super(ERFNet, self).__init__()
         self.encoder = Encoder(128)
-        checkpoint = torch.load('models/erfnet/erfnet_encoder_pretrained.pth.tar')
+        checkpoint_path = Path(__file__).resolve().with_name('erfnet_encoder_pretrained.pth.tar')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
         self.encoder = load_my_state_dict(self.encoder, checkpoint['state_dict'])
 
         # new additions for LaneAF

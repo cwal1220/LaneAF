@@ -16,16 +16,14 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from datasets.tusimple import TuSimple
-from models.dla.pose_dla_dcn import get_pose_net
-from models.erfnet.erfnet import ERFNet
-from models.enet.ENet import ENet
 from models.loss import FocalLoss, IoULoss, RegL1Loss
+from utils.runtime import build_model, load_snapshot, move_sample_to_device, resolve_device
 
 
 parser = argparse.ArgumentParser('Options for training LaneAF models in PyTorch...')
 parser.add_argument('--dataset-dir', type=str, default=None, help='path to dataset')
 parser.add_argument('--output-dir', type=str, default=None, help='output directory for model and logs')
-parser.add_argument('--backbone', type=str, default='dla34', help='type of model backbone (dla34/erfnet/enet)')
+parser.add_argument('--backbone', type=str, default='erfnet', help='type of model backbone (dla34/erfnet/enet)')
 parser.add_argument('--snapshot', type=str, default=None, help='path to pre-trained model snapshot')
 parser.add_argument('--batch-size', type=int, default=8, metavar='N', help='batch size for training')
 parser.add_argument('--epochs', type=int, default=40, metavar='N', help='number of epochs to train for')
@@ -35,6 +33,7 @@ parser.add_argument('--loss-type', type=str, default='wbce', help='type of class
 parser.add_argument('--log-schedule', type=int, default=10, metavar='N', help='number of iterations to print/save log after')
 parser.add_argument('--seed', type=int, default=1, help='set seed to some constant value to reproduce experiments')
 parser.add_argument('--no-cuda', action='store_true', default=False, help='do not use cuda for training')
+parser.add_argument('--device', type=str, default='auto', help='device to use (auto/cpu/cuda/mps)')
 parser.add_argument('--random-transforms', action='store_true', default=False, help='apply random transforms to input during training')
 
 args = parser.parse_args()
@@ -43,7 +42,9 @@ if args.dataset_dir is None:
     assert False, 'Path to dataset not provided!'
 
 # setup args
-args.cuda = not args.no_cuda and torch.cuda.is_available()
+args.device = resolve_device(args.device, args.no_cuda)
+device = torch.device(args.device)
+args.cuda = device.type == 'cuda'
 if args.output_dir is None:
     args.output_dir = datetime.now().strftime("%Y-%m-%d-%H:%M")
     args.output_dir = os.path.join('.', 'experiments', 'tusimple', args.output_dir)
@@ -66,9 +67,9 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-kwargs = {'batch_size': args.batch_size, 'shuffle': True, 'num_workers': 8}
+kwargs = {'batch_size': args.batch_size, 'shuffle': True, 'num_workers': 8, 'pin_memory': args.cuda}
 train_loader = DataLoader(TuSimple(args.dataset_dir, 'train', args.random_transforms), **kwargs)
-kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 8}
+kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 8, 'pin_memory': args.cuda}
 val_loader = DataLoader(TuSimple(args.dataset_dir, 'val', False), **kwargs)
 
 # global var to store best validation F1 score across all epochs
@@ -82,12 +83,7 @@ def train(net, epoch):
     epoch_loss_seg, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1 = list(), list(), list(), list(), list(), list()
     net.train()
     for b_idx, sample in enumerate(train_loader):
-        input_img, input_seg, input_mask, input_af = sample
-        if args.cuda:
-            input_img = input_img.cuda()
-            input_seg = input_seg.cuda()
-            input_mask = input_mask.cuda()
-            input_af = input_af.cuda()
+        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
         # zero gradients before forward pass
         optimizer.zero_grad()
@@ -159,12 +155,7 @@ def val(net, epoch):
     net.eval()
     
     for b_idx, sample in enumerate(val_loader):
-        input_img, input_seg, input_mask, input_af = sample
-        if args.cuda:
-            input_img = input_img.cuda()
-            input_seg = input_seg.cuda()
-            input_mask = input_mask.cuda()
-            input_af = input_af.cuda()
+        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
         # do the forward pass
         outputs = net(input_img)[-1]
@@ -225,17 +216,12 @@ def val(net, epoch):
 
 if __name__ == "__main__":
     heads = {'hm': 1, 'vaf': 2, 'haf': 1}
-    if args.backbone == 'dla34':
-        model = get_pose_net(num_layers=34, heads=heads, head_conv=256, down_ratio=4)
-    elif args.backbone == 'erfnet':
-        model = ERFNet(heads=heads)
-    elif args.backbone == 'enet':
-        model = ENet(heads=heads)
+    model = build_model(args.backbone, heads, device)
 
     if args.snapshot is not None:
-        model.load_state_dict(torch.load(args.snapshot), strict=True)
-    if args.cuda:
-        model.cuda()
+        model = load_snapshot(model, args.snapshot, device)
+    else:
+        model = model.to(device)
     print(model)
 
     # optimizer
@@ -251,7 +237,7 @@ if __name__ == "__main__":
         criterion_1 = torch.nn.BCEWithLogitsLoss()
     elif args.loss_type == 'wbce':
         ## BCE weight
-        criterion_1 = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([9.6]).cuda())
+        criterion_1 = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([9.6], device=device))
     criterion_2 = IoULoss()
     criterion_reg = RegL1Loss()
 

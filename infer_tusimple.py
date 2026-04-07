@@ -12,11 +12,9 @@ import torch
 from torch.utils.data import DataLoader
 
 from datasets.tusimple import TuSimple, get_lanes_tusimple
-from models.dla.pose_dla_dcn import get_pose_net
-from models.erfnet.erfnet import ERFNet
-from models.enet.ENet import ENet
 from utils.affinity_fields import decodeAFs
 from utils.metrics import match_multi_class, LaneEval
+from utils.runtime import build_model, load_snapshot, move_sample_to_device, resolve_device
 from utils.visualize import tensor2image, create_viz
 
 
@@ -24,9 +22,11 @@ parser = argparse.ArgumentParser('Options for inference with LaneAF models in Py
 parser.add_argument('--dataset-dir', type=str, default=None, help='path to dataset')
 parser.add_argument('--output-dir', type=str, default=None, help='output directory for model and logs')
 parser.add_argument('--snapshot', type=str, default=None, help='path to pre-trained model snapshot')
+parser.add_argument('--backbone', type=str, default=None, help='type of model backbone (dla34/erfnet/enet)')
 parser.add_argument('--split', type=str, default='test', help='dataset split to evaluate on (train/val/test)')
 parser.add_argument('--seed', type=int, default=1, help='set seed to some constant value to reproduce experiments')
 parser.add_argument('--no-cuda', action='store_true', default=False, help='do not use cuda for training')
+parser.add_argument('--device', type=str, default='auto', help='device to use (auto/cpu/cuda/mps)')
 parser.add_argument('--save-viz', action='store_true', default=False, help='save visualization depicting intermediate and final results')
 
 args = parser.parse_args()
@@ -35,14 +35,16 @@ if args.dataset_dir is None:
     assert False, 'Path to dataset not provided!'
 if args.snapshot is None:
     assert False, 'Model snapshot not provided!'
-if args.split is ['train', 'val', 'test']:
+if args.split not in ['train', 'val', 'test']:
     assert False, 'Incorrect dataset split provided!'
 
 # set batch size to 1 for visualization purposes
 args.batch_size = 1
 
 # setup args
-args.cuda = not args.no_cuda and torch.cuda.is_available()
+args.device = resolve_device(args.device, args.no_cuda)
+device = torch.device(args.device)
+args.cuda = device.type == 'cuda'
 if args.output_dir is None:
     args.output_dir = datetime.now().strftime("%Y-%m-%d-%H:%M-infer")
     args.output_dir = os.path.join('.', 'experiments', 'tusimple', args.output_dir)
@@ -57,10 +59,10 @@ if os.path.exists(os.path.join(os.path.dirname(args.snapshot), 'config.json')):
     with open(os.path.join(os.path.dirname(args.snapshot), 'config.json')) as f:
         json_args = json.load(f)
     # augment infer args with training args for model consistency
-    if 'backbone' in json_args.keys():
+    if args.backbone is None and 'backbone' in json_args.keys():
         args.backbone = json_args['backbone']
-    else:
-        args.backbone = 'dla34'
+if args.backbone is None:
+    args.backbone = 'erfnet'
 
 # store config in output directory
 with open(os.path.join(args.output_dir, 'config.json'), 'w') as f:
@@ -71,7 +73,7 @@ torch.manual_seed(args.seed)
 if args.cuda:
     torch.cuda.manual_seed(args.seed)
 
-kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 1}
+kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 1, 'pin_memory': args.cuda}
 test_loader = DataLoader(TuSimple(args.dataset_dir, args.split, False), **kwargs)
 
 
@@ -82,12 +84,7 @@ def test(net):
     json_pred = [json.loads(line) for line in open(os.path.join(args.dataset_dir, 'seg_label', args.split+'.json')).readlines()]
 
     for b_idx, sample in enumerate(test_loader):
-        input_img, input_seg, input_mask, input_af = sample
-        if args.cuda:
-            input_img = input_img.cuda()
-            input_seg = input_seg.cuda()
-            input_mask = input_mask.cuda()
-            input_af = input_af.cuda()
+        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
         st_time = datetime.now()
         # do the forward pass
@@ -147,16 +144,9 @@ def test(net):
 
 if __name__ == "__main__":
     heads = {'hm': 1, 'vaf': 2, 'haf': 1}
-    if args.backbone == 'dla34':
-        model = get_pose_net(num_layers=34, heads=heads, head_conv=256, down_ratio=4)
-    elif args.backbone == 'erfnet':
-        model = ERFNet(heads=heads)
-    elif args.backbone == 'enet':
-        model = ENet(heads=heads)
+    model = build_model(args.backbone, heads, device)
 
-    model.load_state_dict(torch.load(args.snapshot), strict=True)
-    if args.cuda:
-        model.cuda()
+    model = load_snapshot(model, args.snapshot, device)
     print(model)
 
     test(model)

@@ -21,26 +21,27 @@
 
 ## Installation
 1) Clone this repository
-2) Install Anaconda
-3) Create a virtual environment and install all dependencies:
+2) Install `uv`
+3) Create a modern virtual environment and install dependencies:
 ```shell
-conda create -n laneaf pip python=3.6
-source activate laneaf
-pip install numpy scipy matplotlib pillow scikit-learn
-pip install opencv-python
-pip install https://download.pytorch.org/whl/cu101/torch-1.7.0%2Bcu101-cp36-cp36m-linux_x86_64.whl
-pip install https://download.pytorch.org/whl/cu101/torchvision-0.8.1%2Bcu101-cp36-cp36m-linux_x86_64.whl
-source deactivate
+cd LaneAF
+uv python install 3.14
+uv sync
 ```
-You can alternately find your desired torch/torchvision wheel from [here](https://download.pytorch.org/whl/torch_stable.html).
 
-4) Clone and make DCNv2:
+4) Optional: build `DCNv2` only if you need the `dla34` backbone on Linux/CUDA:
 ```shell
 cd models/dla
 git clone https://github.com/lbin/DCNv2.git
 cd DCNv2
 ./make.sh
 ```
+
+### Device notes
+- The repository now supports `--device auto|cpu|cuda|mps`.
+- `--device auto` prefers `cuda`, then `mps`, then `cpu`.
+- On Apple Silicon / macOS, use `--device mps`.
+- The `dla34` backbone depends on `DCNv2` and is not supported on macOS/MPS. Use `--backbone erfnet` or `--backbone enet` instead.
 
 ## TuSimple
 The entire [TuSimple dataset](https://github.com/TuSimple/tusimple-benchmark/issues/3) should be downloaded and organized as follows:
@@ -58,28 +59,22 @@ The entire [TuSimple dataset](https://github.com/TuSimple/tusimple-benchmark/iss
 ```
 The model requires ground truth segmentation labels during training. You can generate these for the entire dataset as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python datasets/tusimple.py --dataset-dir=/path/to/TuSimple/
-source deactivate # exit virtual environment
+uv run python datasets/tusimple.py --dataset-dir=/path/to/TuSimple/
 ```
 
 ### Training
 LaneAF models can be trained on the TuSimple dataset as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python train_tusimple.py --dataset-dir=/path/to/TuSimple/ --backbone=dla34 --random-transforms
-source deactivate # exit virtual environment
+uv run python train_tusimple.py --dataset-dir=/path/to/TuSimple/ --backbone=erfnet --device=mps --random-transforms
 ```
-Other supported backbones are `erfnet` and `enet`.
+Other supported backbones are `enet` and `dla34` (`dla34` requires `DCNv2` and CUDA/Linux).
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/tusimple` folder by default.
 
 ### Inference
 Trained LaneAF models can be run on the TuSimple test set as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python infer_tusimple.py --dataset-dir=/path/to/TuSimple/ --snapshot=/path/to/trained/model/snapshot --save-viz
-source deactivate # exit virtual environment
+uv run python infer_tusimple.py --dataset-dir=/path/to/TuSimple/ --snapshot=/path/to/trained/model/snapshot --device=mps --save-viz
 ```
 This will generate outputs in the TuSimple format and also produce benchmark metrics using their [official implementation](https://github.com/TuSimple/tusimple-benchmark/tree/master/doc/lane_detection).
 
@@ -103,20 +98,16 @@ The entire [CULane dataset](https://xingangpan.github.io/projects/CULane.html) s
 ### Training
 LaneAF models can be trained on the CULane dataset as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=dla34 --random-transforms
-source deactivate # exit virtual environment
+uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=erfnet --device=mps --random-transforms
 ```
-Other supported backbones are `erfnet` and `enet`.
+Other supported backbones are `enet` and `dla34` (`dla34` requires `DCNv2` and CUDA/Linux).
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/culane` folder by default.
 
 ### Inference
 Trained LaneAF models can be run on the CULane test set as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python infer_culane.py --dataset-dir=/path/to/CULane/ --snapshot=/path/to/trained/model/snapshot --save-viz
-source deactivate # exit virtual environment
+uv run python infer_culane.py --dataset-dir=/path/to/CULane/ --snapshot=/path/to/trained/model/snapshot --device=mps --save-viz
 ```
 This will generate outputs in the CULane format. You can then use their [official code](https://github.com/XingangPan/SCNN) to evaluate the model on the CULane benchmark.
 
@@ -143,20 +134,16 @@ The [Unsupervised Llamas dataset](https://unsupervised-llamas.com/llamas/index) 
 ### Training
 LaneAF models can be trained on the Llamas dataset as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python train_llamas.py --dataset-dir=/path/to/Llamas/ --backbone=dla34 --random-transforms
-source deactivate # exit virtual environment
+uv run python train_llamas.py --dataset-dir=/path/to/Llamas/ --backbone=erfnet --device=mps --random-transforms
 ```
-Other supported backbones are `erfnet` and `enet`.
+Other supported backbones are `enet` and `dla34` (`dla34` requires `DCNv2` and CUDA/Linux).
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/llamas` folder by default.
 
 ### Inference
 Trained LaneAF models can be run on the Llamas test set as follows:
 ```shell
-source activate laneaf # activate virtual environment
-python infer_llamas.py --dataset-dir=/path/to/Llamas/ --snapshot=/path/to/trained/model/snapshot --save-viz
-source deactivate # exit virtual environment
+uv run python infer_llamas.py --dataset-dir=/path/to/Llamas/ --snapshot=/path/to/trained/model/snapshot --device=mps --save-viz
 ```
 This will generate outputs in the CULane format and Llamas format for the Lane Approximations benchmark. 
 Note that the results produced in the Llamas format could be inaccurate because we *guess* the IDs of the indivudal lanes. 
@@ -180,4 +167,3 @@ If you find our code and/or models useful in your research, please consider citi
     journal={arXiv preprint arXiv:2103.12040},
     year={2021}
     }
-

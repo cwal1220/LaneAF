@@ -1,5 +1,6 @@
 Pipfile
 Pipfile.lock
+.venv/
 experiments/
 data/
 models/dla/DCNv2/
