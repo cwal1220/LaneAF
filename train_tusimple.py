@@ -36,46 +36,57 @@ parser.add_argument('--no-cuda', action='store_true', default=False, help='do no
 parser.add_argument('--device', type=str, default='auto', help='device to use (auto/cpu/cuda/mps)')
 parser.add_argument('--random-transforms', action='store_true', default=False, help='apply random transforms to input during training')
 
-args = parser.parse_args()
-# check args
-if args.dataset_dir is None:
-    assert False, 'Path to dataset not provided!'
-
-# setup args
-args.device = resolve_device(args.device, args.no_cuda)
-device = torch.device(args.device)
-args.cuda = device.type == 'cuda'
-if args.output_dir is None:
-    args.output_dir = datetime.now().strftime("%Y-%m-%d-%H:%M")
-    args.output_dir = os.path.join('.', 'experiments', 'tusimple', args.output_dir)
-
-args.backbone = args.backbone.lower()
-if args.backbone not in ['dla34', 'erfnet', 'enet']:
-    assert False, 'Incorrect model backbone provided!'
-
-if not os.path.exists(args.output_dir):
-    os.makedirs(args.output_dir)
-else:
-    assert False, 'Output directory already exists!'
-
-# store config in output directory
-with open(os.path.join(args.output_dir, 'config.json'), 'w') as f:
-    json.dump(vars(args), f)
-
-# set random seed
-torch.manual_seed(args.seed)
-if args.cuda:
-    torch.cuda.manual_seed(args.seed)
-
-kwargs = {'batch_size': args.batch_size, 'shuffle': True, 'num_workers': 8, 'pin_memory': args.cuda}
-train_loader = DataLoader(TuSimple(args.dataset_dir, 'train', args.random_transforms), **kwargs)
-kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 8, 'pin_memory': args.cuda}
-val_loader = DataLoader(TuSimple(args.dataset_dir, 'val', False), **kwargs)
-
-# global var to store best validation F1 score across all epochs
+args = None
+device = None
+train_loader = None
+val_loader = None
 best_f1 = 0.0
-# create file handles
-f_log = open(os.path.join(args.output_dir, "logs.txt"), "w")
+f_log = None
+optimizer = None
+scheduler = None
+criterion_1 = None
+criterion_2 = None
+criterion_reg = None
+model = None
+
+
+def setup():
+    global args, device, train_loader, val_loader, best_f1, f_log
+
+    args = parser.parse_args()
+    if args.dataset_dir is None:
+        raise AssertionError('Path to dataset not provided!')
+
+    args.device = resolve_device(args.device, args.no_cuda)
+    device = torch.device(args.device)
+    args.cuda = device.type == 'cuda'
+    if args.output_dir is None:
+        args.output_dir = datetime.now().strftime("%Y-%m-%d-%H:%M")
+        args.output_dir = os.path.join('.', 'experiments', 'tusimple', args.output_dir)
+
+    args.backbone = args.backbone.lower()
+    if args.backbone not in ['dla34', 'erfnet', 'enet']:
+        raise AssertionError('Incorrect model backbone provided!')
+
+    if not os.path.exists(args.output_dir):
+        os.makedirs(args.output_dir)
+    else:
+        raise AssertionError('Output directory already exists!')
+
+    with open(os.path.join(args.output_dir, 'config.json'), 'w') as f:
+        json.dump(vars(args), f)
+
+    torch.manual_seed(args.seed)
+    if args.cuda:
+        torch.cuda.manual_seed(args.seed)
+
+    kwargs = {'batch_size': args.batch_size, 'shuffle': True, 'num_workers': 8, 'pin_memory': args.cuda}
+    train_loader = DataLoader(TuSimple(args.dataset_dir, 'train', args.random_transforms), **kwargs)
+    kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 8, 'pin_memory': args.cuda}
+    val_loader = DataLoader(TuSimple(args.dataset_dir, 'val', False), **kwargs)
+
+    best_f1 = 0.0
+    f_log = open(os.path.join(args.output_dir, "logs.txt"), "w")
 
 
 # training function
@@ -215,6 +226,7 @@ def val(net, epoch):
     return avg_loss_seg, avg_loss_vaf, avg_loss_haf, avg_loss, avg_acc, avg_f1
 
 if __name__ == "__main__":
+    setup()
     heads = {'hm': 1, 'vaf': 2, 'haf': 1}
     model = build_model(args.backbone, heads, device)
 
