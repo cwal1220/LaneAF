@@ -14,6 +14,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from datasets.tusimple import TuSimple
 from models.loss import FocalLoss, IoULoss, RegL1Loss
@@ -42,16 +43,42 @@ train_loader = None
 val_loader = None
 best_f1 = 0.0
 f_log = None
+tb_writer = None
 optimizer = None
 scheduler = None
 criterion_1 = None
 criterion_2 = None
 criterion_reg = None
 model = None
+hm_channel_names = ('ego_left', 'ego', 'ego_right')
+
+
+def compute_bce_or_focal_loss(output_ch, target_ch, valid_mask):
+    if args.loss_type == 'focal':
+        return criterion_1(output_ch * valid_mask, target_ch * valid_mask)
+    if args.loss_type == 'bce':
+        return criterion_1(output_ch * valid_mask, target_ch * valid_mask)
+    if args.loss_type == 'wbce':
+        pos_weight = torch.tensor([9.6], device=output_ch.device)
+        return F.binary_cross_entropy_with_logits(output_ch * valid_mask, target_ch * valid_mask, pos_weight=pos_weight)
+    raise AssertionError('Unsupported loss type')
+
+
+def compute_segmentation_losses(outputs_hm, input_mask, ignore_label):
+    channel_losses = {}
+    total = None
+    for idx, name in enumerate(hm_channel_names):
+        output_ch = outputs_hm[:, idx:idx+1, :, :]
+        target_ch = input_mask[:, idx:idx+1, :, :]
+        valid_mask = (target_ch != ignore_label).float()
+        channel_loss = compute_bce_or_focal_loss(output_ch, target_ch, valid_mask) + criterion_2(torch.sigmoid(output_ch), target_ch)
+        channel_losses[name] = channel_loss
+        total = channel_loss if total is None else total + channel_loss
+    return total, channel_losses
 
 
 def setup():
-    global args, device, train_loader, val_loader, best_f1, f_log
+    global args, device, train_loader, val_loader, best_f1, f_log, tb_writer
 
     args = parser.parse_args()
     if args.dataset_dir is None:
@@ -87,11 +114,13 @@ def setup():
 
     best_f1 = 0.0
     f_log = open(os.path.join(args.output_dir, "logs.txt"), "w")
+    tb_writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "tensorboard"))
 
 
 # training function
 def train(net, epoch):
     epoch_loss_seg, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1 = list(), list(), list(), list(), list(), list()
+    epoch_loss_seg_channels = {name: [] for name in hm_channel_names}
     net.train()
     for b_idx, sample in enumerate(train_loader):
         input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
@@ -103,18 +132,19 @@ def train(net, epoch):
         outputs = net(input_img)[-1]
 
         # calculate losses and metrics
-        _mask = (input_mask != train_loader.dataset.ignore_label).float()
-        loss_seg = criterion_1(outputs['hm']*_mask, input_mask*_mask) + criterion_2(torch.sigmoid(outputs['hm']), input_mask)
-        loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], input_mask)
-        loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], input_mask)
-        pred = torch.sigmoid(outputs['hm']).detach().cpu().numpy().ravel()
-        target = input_mask.detach().cpu().numpy().ravel()
-        pred[target == train_loader.dataset.ignore_label] = 0
-        target[target == train_loader.dataset.ignore_label] = 0
-        train_acc = accuracy_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64))
-        train_f1 = f1_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64), zero_division=1)
+        af_valid_mask = (input_seg != train_loader.dataset.ignore_label).float()
+        loss_seg, loss_seg_channels = compute_segmentation_losses(outputs['hm'], input_mask, train_loader.dataset.ignore_label)
+        loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], af_valid_mask)
+        loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], af_valid_mask)
+        pred = torch.sigmoid(outputs['hm']).detach().cpu().numpy()
+        target = input_mask.detach().cpu().numpy()
+        valid = target != train_loader.dataset.ignore_label
+        train_acc = accuracy_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64))
+        train_f1 = f1_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64), zero_division=1)
 
         epoch_loss_seg.append(loss_seg.item())
+        for name in hm_channel_names:
+            epoch_loss_seg_channels[name].append(loss_seg_channels[name].item())
         epoch_loss_vaf.append(loss_vaf.item())
         epoch_loss_haf.append(loss_haf.item())
         loss = loss_seg + loss_vaf + loss_haf
@@ -125,16 +155,27 @@ def train(net, epoch):
         loss.backward()
         optimizer.step()
         if b_idx % args.log_schedule == 0:
+            global_step = (epoch - 1) * len(train_loader) + b_idx
             print('Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tF1-score: {:.4f}'.format(
                 epoch, (b_idx+1) * args.batch_size, len(train_loader.dataset),
                 100. * (b_idx+1) * args.batch_size / len(train_loader.dataset), loss.item(), train_f1))
             f_log.write('Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tF1-score: {:.4f}\n'.format(
                 epoch, (b_idx+1) * args.batch_size, len(train_loader.dataset),
                 100. * (b_idx+1) * args.batch_size / len(train_loader.dataset), loss.item(), train_f1))
+            tb_writer.add_scalar('train_step/loss_seg', loss_seg.item(), global_step)
+            for name in hm_channel_names:
+                tb_writer.add_scalar(f'train_step/loss_seg_{name}', loss_seg_channels[name].item(), global_step)
+            tb_writer.add_scalar('train_step/loss_vaf', loss_vaf.item(), global_step)
+            tb_writer.add_scalar('train_step/loss_haf', loss_haf.item(), global_step)
+            tb_writer.add_scalar('train_step/loss_total', loss.item(), global_step)
+            tb_writer.add_scalar('train_step/accuracy', train_acc, global_step)
+            tb_writer.add_scalar('train_step/f1', train_f1, global_step)
+            f_log.flush()
 
     scheduler.step()
     # now that the epoch is completed calculate statistics and store logs
     avg_loss_seg = mean(epoch_loss_seg)
+    avg_loss_seg_channels = {name: mean(epoch_loss_seg_channels[name]) for name in hm_channel_names}
     avg_loss_vaf = mean(epoch_loss_vaf)
     avg_loss_haf = mean(epoch_loss_haf)
     avg_loss = mean(epoch_loss)
@@ -144,6 +185,9 @@ def train(net, epoch):
     f_log.write("\n------------------------ Training metrics ------------------------\n")
     print("Average segmentation loss for epoch = {:.2f}".format(avg_loss_seg))
     f_log.write("Average segmentation loss for epoch = {:.2f}\n".format(avg_loss_seg))
+    for name in hm_channel_names:
+        print("Average {} segmentation loss for epoch = {:.2f}".format(name, avg_loss_seg_channels[name]))
+        f_log.write("Average {} segmentation loss for epoch = {:.2f}\n".format(name, avg_loss_seg_channels[name]))
     print("Average VAF loss for epoch = {:.2f}".format(avg_loss_vaf))
     f_log.write("Average VAF loss for epoch = {:.2f}\n".format(avg_loss_vaf))
     print("Average HAF loss for epoch = {:.2f}".format(avg_loss_haf))
@@ -156,6 +200,15 @@ def train(net, epoch):
     f_log.write("Average F1 score for epoch = {:.4f}\n".format(avg_f1))
     print("------------------------------------------------------------------\n")
     f_log.write("------------------------------------------------------------------\n\n")
+    tb_writer.add_scalar('train_epoch/loss_seg', avg_loss_seg, epoch)
+    for name in hm_channel_names:
+        tb_writer.add_scalar(f'train_epoch/loss_seg_{name}', avg_loss_seg_channels[name], epoch)
+    tb_writer.add_scalar('train_epoch/loss_vaf', avg_loss_vaf, epoch)
+    tb_writer.add_scalar('train_epoch/loss_haf', avg_loss_haf, epoch)
+    tb_writer.add_scalar('train_epoch/loss_total', avg_loss, epoch)
+    tb_writer.add_scalar('train_epoch/accuracy', avg_acc, epoch)
+    tb_writer.add_scalar('train_epoch/f1', avg_f1, epoch)
+    f_log.flush()
     
     return net, avg_loss_seg, avg_loss_vaf, avg_loss_haf, avg_loss, avg_acc, avg_f1
 
@@ -163,38 +216,42 @@ def train(net, epoch):
 def val(net, epoch):
     global best_f1
     epoch_loss_seg, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1 = list(), list(), list(), list(), list(), list()
+    epoch_loss_seg_channels = {name: [] for name in hm_channel_names}
     net.eval()
-    
-    for b_idx, sample in enumerate(val_loader):
-        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
-        # do the forward pass
-        outputs = net(input_img)[-1]
+    with torch.no_grad():
+        for b_idx, sample in enumerate(val_loader):
+            input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
-        # calculate losses and metrics
-        _mask = (input_mask != val_loader.dataset.ignore_label).float()
-        loss_seg = criterion_1(outputs['hm'], input_mask) + criterion_2(torch.sigmoid(outputs['hm']), input_mask)
-        loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], input_mask)
-        loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], input_mask)
-        pred = torch.sigmoid(outputs['hm']).detach().cpu().numpy().ravel()
-        target = input_mask.detach().cpu().numpy().ravel()
-        pred[target == val_loader.dataset.ignore_label] = 0
-        target[target == val_loader.dataset.ignore_label] = 0
-        val_acc = accuracy_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64))
-        val_f1 = f1_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64), zero_division=1)
+            # do the forward pass
+            outputs = net(input_img)[-1]
 
-        epoch_loss_seg.append(loss_seg.item())
-        epoch_loss_vaf.append(loss_vaf.item())
-        epoch_loss_haf.append(loss_haf.item())
-        loss = loss_seg + loss_vaf + loss_haf
-        epoch_loss.append(loss.item())
-        epoch_acc.append(val_acc)
-        epoch_f1.append(val_f1)
+            # calculate losses and metrics
+            af_valid_mask = (input_seg != val_loader.dataset.ignore_label).float()
+            loss_seg, loss_seg_channels = compute_segmentation_losses(outputs['hm'], input_mask, val_loader.dataset.ignore_label)
+            loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], af_valid_mask)
+            loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], af_valid_mask)
+            pred = torch.sigmoid(outputs['hm']).detach().cpu().numpy()
+            target = input_mask.detach().cpu().numpy()
+            valid = target != val_loader.dataset.ignore_label
+            val_acc = accuracy_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64))
+            val_f1 = f1_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64), zero_division=1)
 
-        print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(val_loader.dataset)), len(val_loader.dataset)))
+            epoch_loss_seg.append(loss_seg.item())
+            for name in hm_channel_names:
+                epoch_loss_seg_channels[name].append(loss_seg_channels[name].item())
+            epoch_loss_vaf.append(loss_vaf.item())
+            epoch_loss_haf.append(loss_haf.item())
+            loss = loss_seg + loss_vaf + loss_haf
+            epoch_loss.append(loss.item())
+            epoch_acc.append(val_acc)
+            epoch_f1.append(val_f1)
+
+            print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(val_loader.dataset)), len(val_loader.dataset)))
 
     # now that the epoch is completed calculate statistics and store logs
     avg_loss_seg = mean(epoch_loss_seg)
+    avg_loss_seg_channels = {name: mean(epoch_loss_seg_channels[name]) for name in hm_channel_names}
     avg_loss_vaf = mean(epoch_loss_vaf)
     avg_loss_haf = mean(epoch_loss_haf)
     avg_loss = mean(epoch_loss)
@@ -204,6 +261,9 @@ def val(net, epoch):
     f_log.write("\n------------------------ Validation metrics ------------------------\n")
     print("Average segmentation loss for epoch = {:.2f}".format(avg_loss_seg))
     f_log.write("Average segmentation loss for epoch = {:.2f}\n".format(avg_loss_seg))
+    for name in hm_channel_names:
+        print("Average {} segmentation loss for epoch = {:.2f}".format(name, avg_loss_seg_channels[name]))
+        f_log.write("Average {} segmentation loss for epoch = {:.2f}\n".format(name, avg_loss_seg_channels[name]))
     print("Average VAF loss for epoch = {:.2f}".format(avg_loss_vaf))
     f_log.write("Average VAF loss for epoch = {:.2f}\n".format(avg_loss_vaf))
     print("Average HAF loss for epoch = {:.2f}".format(avg_loss_haf))
@@ -216,6 +276,15 @@ def val(net, epoch):
     f_log.write("Average F1 score for epoch = {:.4f}\n".format(avg_f1))
     print("--------------------------------------------------------------------\n")
     f_log.write("--------------------------------------------------------------------\n\n")
+    tb_writer.add_scalar('val_epoch/loss_seg', avg_loss_seg, epoch)
+    for name in hm_channel_names:
+        tb_writer.add_scalar(f'val_epoch/loss_seg_{name}', avg_loss_seg_channels[name], epoch)
+    tb_writer.add_scalar('val_epoch/loss_vaf', avg_loss_vaf, epoch)
+    tb_writer.add_scalar('val_epoch/loss_haf', avg_loss_haf, epoch)
+    tb_writer.add_scalar('val_epoch/loss_total', avg_loss, epoch)
+    tb_writer.add_scalar('val_epoch/accuracy', avg_acc, epoch)
+    tb_writer.add_scalar('val_epoch/f1', avg_f1, epoch)
+    f_log.flush()
 
     # now save the model if it has a better F1 score than the best model seen so forward
     if avg_f1 > best_f1:
@@ -227,7 +296,7 @@ def val(net, epoch):
 
 if __name__ == "__main__":
     setup()
-    heads = {'hm': 1, 'vaf': 2, 'haf': 1}
+    heads = {'hm': 3, 'vaf': 2, 'haf': 1}
     model = build_model(args.backbone, heads, device)
 
     if args.snapshot is not None:
@@ -249,7 +318,7 @@ if __name__ == "__main__":
         criterion_1 = torch.nn.BCEWithLogitsLoss()
     elif args.loss_type == 'wbce':
         ## BCE weight
-        criterion_1 = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([9.6], device=device))
+        criterion_1 = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([9.6, 9.6, 9.6], device=device).view(3, 1, 1))
     criterion_2 = IoULoss()
     criterion_reg = RegL1Loss()
 

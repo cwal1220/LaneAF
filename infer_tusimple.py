@@ -83,54 +83,56 @@ def test(net):
     out_vid = None
     json_pred = [json.loads(line) for line in open(os.path.join(args.dataset_dir, 'seg_label', args.split+'.json')).readlines()]
 
-    for b_idx, sample in enumerate(test_loader):
-        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
+    with torch.no_grad():
+        for b_idx, sample in enumerate(test_loader):
+            input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
-        st_time = datetime.now()
-        # do the forward pass
-        outputs = net(input_img)[-1]
+            st_time = datetime.now()
+            # do the forward pass
+            outputs = net(input_img)[-1]
 
-        # convert to arrays
-        img = tensor2image(input_img.detach(), np.array(test_loader.dataset.mean), 
-            np.array(test_loader.dataset.std))
-        mask_out = tensor2image(torch.sigmoid(outputs['hm']).repeat(1, 3, 1, 1).detach(), 
-            np.array([0.0 for _ in range(3)], dtype='float32'), np.array([1.0 for _ in range(3)], dtype='float32'))
-        vaf_out = np.transpose(outputs['vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
-        haf_out = np.transpose(outputs['haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
+            # convert to arrays
+            img = tensor2image(input_img.detach(), np.array(test_loader.dataset.mean), 
+                np.array(test_loader.dataset.std))
+            hm_out = torch.sigmoid(outputs['hm']).detach()
+            mask_out = tensor2image(hm_out, 
+                np.array([0.0 for _ in range(3)], dtype='float32'), np.array([1.0 for _ in range(3)], dtype='float32'))
+            vaf_out = np.transpose(outputs['vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
+            haf_out = np.transpose(outputs['haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
 
-        # decode AFs to get lane instances
-        seg_out = decodeAFs(mask_out[:, :, 0], vaf_out, haf_out, fg_thresh=128, err_thresh=5)
-        ed_time = datetime.now()
+            # decode AFs to get lane instances from the ego-center channel
+            seg_out = decodeAFs(mask_out[:, :, 1], vaf_out, haf_out, fg_thresh=128, err_thresh=5)
+            ed_time = datetime.now()
 
-        if torch.any(torch.isnan(input_seg)):
-            # if labels are not available, skip this step
-            pass
-        else:
-            # if test set labels are available
-            # re-assign lane IDs to match with ground truth
-            seg_out = match_multi_class(seg_out.astype(np.int64), input_seg[0, 0, :, :].detach().cpu().numpy().astype(np.int64))
+            if torch.any(torch.isnan(input_seg)):
+                # if labels are not available, skip this step
+                pass
+            else:
+                # if test set labels are available
+                # re-assign lane IDs to match with ground truth
+                seg_out = match_multi_class(seg_out.astype(np.int64), input_seg[0, 0, :, :].detach().cpu().numpy().astype(np.int64))
 
-        # fill results in output structure
-        json_pred[b_idx]['run_time'] = (ed_time - st_time).total_seconds()*1000.
-        if json_pred[b_idx]['run_time'] > 200:
-            json_pred[b_idx]['run_time'] = 200
-        json_pred[b_idx]['lanes'] = get_lanes_tusimple(seg_out, json_pred[b_idx]['h_samples'], test_loader.dataset.samp_factor)
+            # fill results in output structure
+            json_pred[b_idx]['run_time'] = (ed_time - st_time).total_seconds()*1000.
+            if json_pred[b_idx]['run_time'] > 200:
+                json_pred[b_idx]['run_time'] = 200
+            json_pred[b_idx]['lanes'] = get_lanes_tusimple(seg_out, json_pred[b_idx]['h_samples'], test_loader.dataset.samp_factor)
 
-        # write results to file
-        with open(os.path.join(args.output_dir, 'outputs.json'), 'a') as f:
-            json.dump(json_pred[b_idx], f)
-            f.write('\n')
+            # write results to file
+            with open(os.path.join(args.output_dir, 'outputs.json'), 'a') as f:
+                json.dump(json_pred[b_idx], f)
+                f.write('\n')
 
-        # create video visualization
-        if args.save_viz:
-            img_out = create_viz(img, seg_out.astype(np.uint8), mask_out, vaf_out, haf_out)
+            # create video visualization
+            if args.save_viz:
+                img_out = create_viz(img, seg_out.astype(np.uint8), mask_out, vaf_out, haf_out)
 
-            if out_vid is None:
-                out_vid = cv2.VideoWriter(os.path.join(args.output_dir, 'out.mkv'), 
-                    cv2.VideoWriter_fourcc(*'H264'), 5, (img_out.shape[1], img_out.shape[0]))
-            out_vid.write(img_out)
+                if out_vid is None:
+                    out_vid = cv2.VideoWriter(os.path.join(args.output_dir, 'out.mkv'), 
+                        cv2.VideoWriter_fourcc(*'H264'), 5, (img_out.shape[1], img_out.shape[0]))
+                out_vid.write(img_out)
 
-        print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(test_loader.dataset)), len(test_loader.dataset)))
+            print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(test_loader.dataset)), len(test_loader.dataset)))
 
     # benchmark on TuSimple
     results = LaneEval.bench_one_submit(os.path.join(args.output_dir, 'outputs.json'), os.path.join(args.dataset_dir, 'seg_label', args.split+'.json'))
@@ -143,7 +145,7 @@ def test(net):
     return
 
 if __name__ == "__main__":
-    heads = {'hm': 1, 'vaf': 2, 'haf': 1}
+    heads = {'hm': 3, 'vaf': 2, 'haf': 1}
     model = build_model(args.backbone, heads, device)
 
     model = load_snapshot(model, args.snapshot, device)

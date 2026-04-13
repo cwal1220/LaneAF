@@ -164,34 +164,35 @@ def val(net, epoch):
     global best_f1
     epoch_loss_seg, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1 = list(), list(), list(), list(), list(), list()
     net.eval()
-    
-    for b_idx, sample in enumerate(val_loader):
-        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
-        # do the forward pass
-        outputs = net(input_img)[-1]
+    with torch.no_grad():
+        for b_idx, sample in enumerate(val_loader):
+            input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
-        # calculate losses and metrics
-        _mask = (input_mask != val_loader.dataset.ignore_label).float()
-        loss_seg = criterion_1(outputs['hm'], input_mask) + criterion_2(torch.sigmoid(outputs['hm']), input_mask)
-        loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], input_mask)
-        loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], input_mask)
-        pred = torch.sigmoid(outputs['hm']).detach().cpu().numpy().ravel()
-        target = input_mask.detach().cpu().numpy().ravel()
-        pred[target == val_loader.dataset.ignore_label] = 0
-        target[target == val_loader.dataset.ignore_label] = 0
-        val_acc = accuracy_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64))
-        val_f1 = f1_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64), zero_division=1)
+            # do the forward pass
+            outputs = net(input_img)[-1]
 
-        epoch_loss_seg.append(loss_seg.item())
-        epoch_loss_vaf.append(loss_vaf.item())
-        epoch_loss_haf.append(loss_haf.item())
-        loss = loss_seg + loss_vaf + loss_haf
-        epoch_loss.append(loss.item())
-        epoch_acc.append(val_acc)
-        epoch_f1.append(val_f1)
+            # calculate losses and metrics
+            _mask = (input_mask != val_loader.dataset.ignore_label).float()
+            loss_seg = criterion_1(outputs['hm'], input_mask) + criterion_2(torch.sigmoid(outputs['hm']), input_mask)
+            loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], input_mask)
+            loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], input_mask)
+            pred = torch.sigmoid(outputs['hm']).detach().cpu().numpy().ravel()
+            target = input_mask.detach().cpu().numpy().ravel()
+            pred[target == val_loader.dataset.ignore_label] = 0
+            target[target == val_loader.dataset.ignore_label] = 0
+            val_acc = accuracy_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64))
+            val_f1 = f1_score((target > 0.5).astype(np.int64), (pred > 0.5).astype(np.int64), zero_division=1)
 
-        print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(val_loader.dataset)), len(val_loader.dataset)))
+            epoch_loss_seg.append(loss_seg.item())
+            epoch_loss_vaf.append(loss_vaf.item())
+            epoch_loss_haf.append(loss_haf.item())
+            loss = loss_seg + loss_vaf + loss_haf
+            epoch_loss.append(loss.item())
+            epoch_acc.append(val_acc)
+            epoch_f1.append(val_f1)
+
+            print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(val_loader.dataset)), len(val_loader.dataset)))
 
     # now that the epoch is completed calculate statistics and store logs
     avg_loss_seg = mean(epoch_loss_seg)

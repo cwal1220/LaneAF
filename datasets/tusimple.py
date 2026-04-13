@@ -73,6 +73,31 @@ def get_lanes_tusimple(seg_out, h_samples, samp_factor):
             print("Lane too small, discarding...")
     return lanes
 
+
+def _lane_band_from_pair(seg_ids, left_id, right_id):
+    band = np.zeros_like(seg_ids, dtype=np.uint8)
+    for row in range(seg_ids.shape[0]):
+        left_cols = np.where(seg_ids[row, :] == left_id)[0]
+        right_cols = np.where(seg_ids[row, :] == right_id)[0]
+        if left_cols.size == 0 or right_cols.size == 0:
+            continue
+        left_col = int(round(left_cols.mean()))
+        right_col = int(round(right_cols.mean()))
+        if left_col > right_col:
+            left_col, right_col = right_col, left_col
+        band[row, left_col:right_col + 1] = 1
+    return band
+
+
+def _build_ego_triplet_mask(seg_ids, ignore_label):
+    ego_left = _lane_band_from_pair(seg_ids, left_id=1, right_id=2)
+    ego = _lane_band_from_pair(seg_ids, left_id=2, right_id=3)
+    ego_right = _lane_band_from_pair(seg_ids, left_id=3, right_id=4)
+    mask = np.stack((ego_left, ego, ego_right), axis=2).astype(np.float32)
+    ignore = seg_ids == ignore_label
+    mask[ignore, :] = float(ignore_label)
+    return mask
+
 class TuSimple(Dataset):
     def __init__(self, path, image_set='train', random_transforms=False):
         super(TuSimple, self).__init__()
@@ -126,20 +151,18 @@ class TuSimple(Dataset):
             seg = seg[16:, :, :]
             img, seg = self.transforms((img, seg))
             seg = cv2.resize(seg, None, fx=self.output_scale, fy=self.output_scale, interpolation=cv2.INTER_NEAREST)
-            # create binary mask
-            mask = seg[:, :, 0].copy()
-            mask[seg[:, :, 0] >= 1] = 1
-            mask[seg[:, :, 0] == self.ignore_label] = self.ignore_label
+            seg_ids = seg[:, :, 0]
+            mask = _build_ego_triplet_mask(seg_ids, self.ignore_label)
             # create AFs
-            seg_wo_ignore = seg[:, :, 0].copy()
+            seg_wo_ignore = seg_ids.copy()
             seg_wo_ignore[seg_wo_ignore == self.ignore_label] = 0
             vaf, haf = generateAFs(seg_wo_ignore.astype(np.long), viz=False)
             af = np.concatenate((vaf, haf[:, :, 0:1]), axis=2)
 
             # convert all outputs to torch tensors
             img = torch.from_numpy(img).permute(2, 0, 1).contiguous().float()
-            seg = torch.from_numpy(seg[:, :, 0]).contiguous().long().unsqueeze(0)
-            mask = torch.from_numpy(mask).contiguous().float().unsqueeze(0)
+            seg = torch.from_numpy(seg_ids).contiguous().long().unsqueeze(0)
+            mask = torch.from_numpy(mask).permute(2, 0, 1).contiguous().float()
             af = torch.from_numpy(af).permute(2, 0, 1).contiguous().float()
         else: # if labels not available, set ground truth tensors to nan values
             img, _ = self.transforms((img, img))

@@ -87,50 +87,51 @@ def test(net):
     net.eval()
     out_vid = None
 
-    for b_idx, sample in enumerate(test_loader):
-        input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
+    with torch.no_grad():
+        for b_idx, sample in enumerate(test_loader):
+            input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
 
-        # do the forward pass
-        outputs = net(input_img)[-1]
+            # do the forward pass
+            outputs = net(input_img)[-1]
 
-        # convert to arrays
-        img = tensor2image(input_img.detach(), np.array(test_loader.dataset.mean), 
-            np.array(test_loader.dataset.std))
-        mask_out = tensor2image(torch.sigmoid(outputs['hm']).repeat(1, 3, 1, 1).detach(), 
-            np.array([0.0 for _ in range(3)], dtype='float32'), np.array([1.0 for _ in range(3)], dtype='float32'))
-        vaf_out = np.transpose(outputs['vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
-        haf_out = np.transpose(outputs['haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
+            # convert to arrays
+            img = tensor2image(input_img.detach(), np.array(test_loader.dataset.mean), 
+                np.array(test_loader.dataset.std))
+            mask_out = tensor2image(torch.sigmoid(outputs['hm']).repeat(1, 3, 1, 1).detach(), 
+                np.array([0.0 for _ in range(3)], dtype='float32'), np.array([1.0 for _ in range(3)], dtype='float32'))
+            vaf_out = np.transpose(outputs['vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
+            haf_out = np.transpose(outputs['haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
 
-        # decode AFs to get lane instances
-        seg_out = decodeAFs(mask_out[:, :, 0], vaf_out, haf_out, fg_thresh=128, err_thresh=5)
+            # decode AFs to get lane instances
+            seg_out = decodeAFs(mask_out[:, :, 0], vaf_out, haf_out, fg_thresh=128, err_thresh=5)
 
-        if torch.any(torch.isnan(input_seg)):
-            # if labels are not available, skip this step
-            pass
-        else:
-            # if test set labels are available
-            # re-assign lane IDs to match with ground truth
-            seg_out = match_multi_class(seg_out.astype(np.int64), input_seg[0, 0, :, :].detach().cpu().numpy().astype(np.int64))
+            if torch.any(torch.isnan(input_seg)):
+                # if labels are not available, skip this step
+                pass
+            else:
+                # if test set labels are available
+                # re-assign lane IDs to match with ground truth
+                seg_out = match_multi_class(seg_out.astype(np.int64), input_seg[0, 0, :, :].detach().cpu().numpy().astype(np.int64))
 
-        # get results in output structure
-        xy_coords = get_lanes_culane(seg_out, test_loader.dataset.samp_factor)
+            # get results in output structure
+            xy_coords = get_lanes_culane(seg_out, test_loader.dataset.samp_factor)
 
-        # write results to file
-        if not os.path.exists(os.path.join(args.output_dir, 'outputs', os.path.dirname(filenames[b_idx][1:]))):
-            os.makedirs(os.path.join(args.output_dir, 'outputs', os.path.dirname(filenames[b_idx][1:])))
-        with open(os.path.join(args.output_dir, 'outputs', filenames[b_idx][1:-3]+'lines.txt'), 'w') as f:
-            f.write('\n'.join(' '.join(map(str, _lane)) for _lane in xy_coords))
+            # write results to file
+            if not os.path.exists(os.path.join(args.output_dir, 'outputs', os.path.dirname(filenames[b_idx][1:]))):
+                os.makedirs(os.path.join(args.output_dir, 'outputs', os.path.dirname(filenames[b_idx][1:])))
+            with open(os.path.join(args.output_dir, 'outputs', filenames[b_idx][1:-3]+'lines.txt'), 'w') as f:
+                f.write('\n'.join(' '.join(map(str, _lane)) for _lane in xy_coords))
 
-        # create video visualization
-        if args.save_viz:
-            img_out = create_viz(img, seg_out.astype(np.uint8), mask_out, vaf_out, haf_out)
+            # create video visualization
+            if args.save_viz:
+                img_out = create_viz(img, seg_out.astype(np.uint8), mask_out, vaf_out, haf_out)
 
-            if out_vid is None:
-                out_vid = cv2.VideoWriter(os.path.join(args.output_dir, 'out.mkv'), 
-                    cv2.VideoWriter_fourcc(*'H264'), 5, (img_out.shape[1], img_out.shape[0]))
-            out_vid.write(img_out)
+                if out_vid is None:
+                    out_vid = cv2.VideoWriter(os.path.join(args.output_dir, 'out.mkv'), 
+                        cv2.VideoWriter_fourcc(*'H264'), 5, (img_out.shape[1], img_out.shape[0]))
+                out_vid.write(img_out)
 
-        print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(test_loader.dataset)), len(test_loader.dataset)))
+            print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(test_loader.dataset)), len(test_loader.dataset)))
 
     if args.save_viz:
         out_vid.release()
