@@ -14,6 +14,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from datasets.culane import CULane
 from models.loss import FocalLoss, IoULoss, RegL1Loss
@@ -76,6 +77,7 @@ val_loader = DataLoader(CULane(args.dataset_dir, 'val', False), **kwargs)
 best_f1 = 0.0
 # create file handles
 f_log = open(os.path.join(args.output_dir, "logs.txt"), "w")
+tb_writer = SummaryWriter(log_dir=os.path.join(args.output_dir, "tensorboard"))
 
 
 # training function
@@ -114,12 +116,19 @@ def train(net, epoch):
         loss.backward()
         optimizer.step()
         if b_idx % args.log_schedule == 0:
+            global_step = (epoch - 1) * len(train_loader) + b_idx
             print('Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tF1-score: {:.4f}'.format(
                 epoch, (b_idx+1) * args.batch_size, len(train_loader.dataset),
                 100. * (b_idx+1) * args.batch_size / len(train_loader.dataset), loss.item(), train_f1))
             f_log.write('Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\tF1-score: {:.4f}\n'.format(
                 epoch, (b_idx+1) * args.batch_size, len(train_loader.dataset),
                 100. * (b_idx+1) * args.batch_size / len(train_loader.dataset), loss.item(), train_f1))
+            tb_writer.add_scalar('train_step/loss_seg', loss_seg.item(), global_step)
+            tb_writer.add_scalar('train_step/loss_vaf', loss_vaf.item(), global_step)
+            tb_writer.add_scalar('train_step/loss_haf', loss_haf.item(), global_step)
+            tb_writer.add_scalar('train_step/loss_total', loss.item(), global_step)
+            tb_writer.add_scalar('train_step/accuracy', train_acc, global_step)
+            tb_writer.add_scalar('train_step/f1', train_f1, global_step)
 
     scheduler.step()
     # now that the epoch is completed calculate statistics and store logs
@@ -145,6 +154,12 @@ def train(net, epoch):
     f_log.write("Average F1 score for epoch = {:.4f}\n".format(avg_f1))
     print("------------------------------------------------------------------\n")
     f_log.write("------------------------------------------------------------------\n\n")
+    tb_writer.add_scalar('train_epoch/loss_seg', avg_loss_seg, epoch)
+    tb_writer.add_scalar('train_epoch/loss_vaf', avg_loss_vaf, epoch)
+    tb_writer.add_scalar('train_epoch/loss_haf', avg_loss_haf, epoch)
+    tb_writer.add_scalar('train_epoch/loss_total', avg_loss, epoch)
+    tb_writer.add_scalar('train_epoch/accuracy', avg_acc, epoch)
+    tb_writer.add_scalar('train_epoch/f1', avg_f1, epoch)
     
     return net, avg_loss_seg, avg_loss_vaf, avg_loss_haf, avg_loss, avg_acc, avg_f1
 
@@ -205,6 +220,12 @@ def val(net, epoch):
     f_log.write("Average F1 score for epoch = {:.4f}\n".format(avg_f1))
     print("--------------------------------------------------------------------\n")
     f_log.write("--------------------------------------------------------------------\n\n")
+    tb_writer.add_scalar('val_epoch/loss_seg', avg_loss_seg, epoch)
+    tb_writer.add_scalar('val_epoch/loss_vaf', avg_loss_vaf, epoch)
+    tb_writer.add_scalar('val_epoch/loss_haf', avg_loss_haf, epoch)
+    tb_writer.add_scalar('val_epoch/loss_total', avg_loss, epoch)
+    tb_writer.add_scalar('val_epoch/accuracy', avg_acc, epoch)
+    tb_writer.add_scalar('val_epoch/f1', avg_f1, epoch)
 
     # now save the model if it has a better F1 score than the best model seen so forward
     if avg_f1 > best_f1:
@@ -310,3 +331,4 @@ if __name__ == "__main__":
 
     plt.close('all')
     f_log.close()
+    tb_writer.close()

@@ -13,11 +13,12 @@
 
 ## Overview
 1) [Installation](#installation)
-2) [TuSimple](#tusimple)
-3) [CULane](#culane)
-4) [Unsupervised Llamas](#unsupervised-llamas)
-5) [Pre-trained Weights](#pre-trained-weights)
-5) [Citation](#citation)
+2) [Quick Start](#quick-start)
+3) [TuSimple](#tusimple)
+4) [CULane](#culane)
+5) [Unsupervised Llamas](#unsupervised-llamas)
+6) [Pre-trained Weights](#pre-trained-weights)
+7) [Citation](#citation)
 
 ## Installation
 1) Clone this repository
@@ -25,23 +26,100 @@
 3) Create a modern virtual environment and install dependencies:
 ```shell
 cd LaneAF
-uv python install 3.14
+uv python install 3.12
 uv sync
 ```
 
-4) Optional: build `DCNv2` only if you need the `dla34` backbone on Linux/CUDA:
+### macOS setup
+- Apple Silicon Macs can run `erfnet`, `enet`, and `dla34` with `--device mps`.
+- Intel Macs can use the same environment, usually with `--device cpu`.
+- The `pyproject.toml` CUDA wheel override only applies on Linux `x86_64`, so macOS installs the regular PyTorch wheels automatically.
+- Verify the runtime with:
 ```shell
-cd models/dla
-git clone https://github.com/lbin/DCNv2.git
-cd DCNv2
-./make.sh
+uv run python -c "import torch; print(torch.__version__); print('mps', torch.backends.mps.is_available()); print('cuda', torch.cuda.is_available())"
+```
+- Example training command on Apple Silicon:
+```shell
+uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=dla34 --device=mps
+```
+
+### Linux x86_64 / CUDA setup
+- Linux `x86_64` uses the official PyTorch `cu121` wheels.
+- This repository is pinned to Python `3.12` because the `3.14` wheels currently resolve to a newer CUDA runtime that may be incompatible with older NVIDIA drivers.
+- On NVIDIA systems with drivers roughly matching CUDA `12.2`, `uv sync` should install a working CUDA-enabled PyTorch build.
+- You can verify GPU availability with:
+```shell
+uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no-gpu')"
+```
+- Example training command on Linux with NVIDIA GPU:
+```shell
+uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=dla34 --device=cuda
 ```
 
 ### Device notes
 - The repository now supports `--device auto|cpu|cuda|mps`.
 - `--device auto` prefers `cuda`, then `mps`, then `cpu`.
 - On Apple Silicon / macOS, use `--device mps`.
-- The `dla34` backbone depends on `DCNv2` and is not supported on macOS/MPS. Use `--backbone erfnet` or `--backbone enet` instead.
+- `dla34`, `erfnet`, and `enet` all run without any extra native extensions.
+- `dla34` still loads the standard ImageNet-pretrained DLA-34 backbone weights, but its LaneAF upsampling path now uses standard `Conv2d` blocks instead of `DCNv2`.
+
+### Checkpoints and Export
+- Training snapshots are saved as `.pth` files.
+- `export_onnx.py` exports a fixed-batch ONNX graph with batch size `1`, which is usually the right shape contract for NPU deployment.
+- Example:
+```shell
+uv run python export_onnx.py \
+  --snapshot /path/to/model.pth \
+  --output /path/to/model_b1.onnx \
+  --backbone dla34 \
+  --height 288 \
+  --width 832 \
+  --clean-identity
+```
+
+## Quick Start
+1) Install the environment:
+```shell
+cd LaneAF
+uv python install 3.12
+uv sync
+```
+
+2) Download the CULane archive.
+- One working source is Kaggle: https://www.kaggle.com/datasets/manideep1108/culane
+- This guide assumes the archive is available at `/home/chan/Downloads/CULane.zip`.
+
+3) Extract the dataset:
+```shell
+mkdir -p data/CULane
+unzip /home/chan/Downloads/CULane.zip -d data/CULane
+```
+
+4) Start training.
+- Apple Silicon / macOS:
+```shell
+uv run python train_culane.py --dataset-dir=data/CULane --backbone=dla34 --device=mps
+```
+- Linux `x86_64` with NVIDIA GPU:
+```shell
+uv run python train_culane.py --dataset-dir=data/CULane --backbone=dla34 --device=cuda
+```
+
+5) Monitor training with TensorBoard:
+```shell
+uv run python -m tensorboard.main --logdir experiments/culane --host 0.0.0.0 --port 6006
+```
+
+6) Export a trained checkpoint to ONNX for batch-1 deployment:
+```shell
+uv run python export_onnx.py \
+  --snapshot /path/to/model.pth \
+  --output /path/to/model_b1.onnx \
+  --backbone dla34 \
+  --height 288 \
+  --width 832 \
+  --clean-identity
+```
 
 ## TuSimple
 The entire [TuSimple dataset](https://github.com/TuSimple/tusimple-benchmark/issues/3) should be downloaded and organized as follows:
@@ -67,7 +145,7 @@ LaneAF models can be trained on the TuSimple dataset as follows:
 ```shell
 uv run python train_tusimple.py --dataset-dir=/path/to/TuSimple/ --backbone=erfnet --device=mps --random-transforms
 ```
-Other supported backbones are `enet` and `dla34` (`dla34` requires `DCNv2` and CUDA/Linux).
+Other supported backbones are `enet` and `dla34`.
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/tusimple` folder by default.
 
@@ -100,9 +178,10 @@ LaneAF models can be trained on the CULane dataset as follows:
 ```shell
 uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=erfnet --device=mps --random-transforms
 ```
-Other supported backbones are `enet` and `dla34` (`dla34` requires `DCNv2` and CUDA/Linux).
+Other supported backbones are `enet` and `dla34`.
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/culane` folder by default.
+`train_culane.py` also writes TensorBoard event files under `output_dir/tensorboard`.
 
 ### Inference
 Trained LaneAF models can be run on the CULane test set as follows:
@@ -136,7 +215,7 @@ LaneAF models can be trained on the Llamas dataset as follows:
 ```shell
 uv run python train_llamas.py --dataset-dir=/path/to/Llamas/ --backbone=erfnet --device=mps --random-transforms
 ```
-Other supported backbones are `enet` and `dla34` (`dla34` requires `DCNv2` and CUDA/Linux).
+Other supported backbones are `enet` and `dla34`.
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/llamas` folder by default.
 

@@ -3,7 +3,6 @@ Pipfile.lock
 .venv/
 experiments/
 data/
-models/dla/DCNv2/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

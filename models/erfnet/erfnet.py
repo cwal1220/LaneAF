@@ -125,13 +125,16 @@ class Decoder (nn.Module): # modified decoder for LaneAF
 
 def load_my_state_dict(model, state_dict):  # custom function to load model when not all dict elements
     own_state = model.state_dict()
-    ckpt_name = []
     cnt = 0
     for name, param in state_dict.items():
-        if name not in list(own_state.keys()) or 'output_conv' in name:
-             ckpt_name.append(name)
-             continue
-        own_state[name].copy_(param)
+        normalized_name = name
+        for prefix in ("module.features.encoder.", "features.encoder.", "encoder.", "module."):
+            if normalized_name.startswith(prefix):
+                normalized_name = normalized_name[len(prefix):]
+                break
+        if normalized_name not in own_state or 'output_conv' in normalized_name:
+            continue
+        own_state[normalized_name].copy_(param)
         cnt += 1
     print('#reused param: {}'.format(cnt))
     return model
@@ -148,7 +151,7 @@ class ERFNet(nn.Module):
         super(ERFNet, self).__init__()
         self.encoder = Encoder(128)
         checkpoint_path = Path(__file__).resolve().with_name('erfnet_encoder_pretrained.pth.tar')
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         self.encoder = load_my_state_dict(self.encoder, checkpoint['state_dict'])
 
         # new additions for LaneAF

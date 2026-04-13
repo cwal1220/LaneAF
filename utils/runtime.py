@@ -12,6 +12,28 @@ from models.erfnet.erfnet import ERFNet
 SUPPORTED_BACKBONES = ("dla34", "erfnet", "enet")
 
 
+def normalize_state_dict(
+    model: torch.nn.Module,
+    state_dict: dict[str, torch.Tensor],
+) -> dict[str, torch.Tensor]:
+    model_keys = set(model.state_dict().keys())
+    normalized: dict[str, torch.Tensor] = {}
+
+    for key, value in state_dict.items():
+        if key in model_keys:
+            normalized[key] = value
+            continue
+
+        # Older DLA checkpoints stored DCNv2-specific tensors that no longer
+        # exist now that the upsampling path uses plain Conv2d blocks.
+        if key.endswith(".conv.bias") or ".conv.conv_offset_mask." in key:
+            continue
+
+        normalized[key] = value
+
+    return normalized
+
+
 def resolve_device(requested: str = "auto", no_cuda: bool = False) -> str:
     requested = requested.lower()
     if no_cuda and requested == "auto":
@@ -57,18 +79,7 @@ def build_model(backbone: str, heads: dict[str, int], device: torch.device) -> t
         raise ValueError(f"Incorrect model backbone provided: {backbone}")
 
     if backbone == "dla34":
-        if device.type == "mps":
-            raise RuntimeError(
-                "The DLA-34 backbone depends on DCNv2, which is not supported on macOS/MPS. "
-                "Use --backbone erfnet or --backbone enet on Apple Silicon."
-            )
-        try:
-            from models.dla.pose_dla_dcn import get_pose_net
-        except ModuleNotFoundError as exc:
-            raise RuntimeError(
-                "The DLA-34 backbone requires models/dla/DCNv2 to be built. "
-                "On macOS/MPS, use --backbone erfnet or --backbone enet instead."
-            ) from exc
+        from models.dla.pose_dla_dcn import get_pose_net
         return get_pose_net(num_layers=34, heads=heads, head_conv=256, down_ratio=4)
 
     if backbone == "erfnet":
@@ -78,6 +89,7 @@ def build_model(backbone: str, heads: dict[str, int], device: torch.device) -> t
 
 
 def load_snapshot(model: torch.nn.Module, snapshot_path: str | Path, device: torch.device) -> torch.nn.Module:
-    state_dict = torch.load(snapshot_path, map_location="cpu")
+    state_dict = torch.load(snapshot_path, map_location="cpu", weights_only=True)
+    state_dict = normalize_state_dict(model, state_dict)
     model.load_state_dict(state_dict, strict=True)
     return model.to(device)

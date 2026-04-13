@@ -13,8 +13,6 @@ from torch import nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
-from .DCNv2.dcn_v2 import DCN
-
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
 
@@ -345,11 +343,19 @@ def fill_up_weights(up):
 class DeformConv(nn.Module):
     def __init__(self, chi, cho):
         super(DeformConv, self).__init__()
+        # Keep the DLA upsampling path self-contained with standard Conv2d.
+        self.conv = nn.Conv2d(
+            chi,
+            cho,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=False,
+        )
         self.actf = nn.Sequential(
             nn.BatchNorm2d(cho, momentum=BN_MOMENTUM),
             nn.ReLU(inplace=True)
         )
-        self.conv = DCN(chi, cho, kernel_size=(3,3), stride=1, padding=1, dilation=1, deformable_groups=1)
 
     def forward(self, x):
         x = self.conv(x)
