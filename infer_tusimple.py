@@ -15,6 +15,7 @@ from datasets.tusimple import TuSimple, get_lanes_tusimple
 from utils.affinity_fields import decodeAFs
 from utils.metrics import match_multi_class, LaneEval
 from utils.runtime import build_model, load_snapshot, move_sample_to_device, resolve_device
+from utils.tusimple_targets import TUSIMPLE_HEADS
 from utils.visualize import tensor2image, create_viz
 
 
@@ -85,7 +86,7 @@ def test(net):
 
     with torch.no_grad():
         for b_idx, sample in enumerate(test_loader):
-            input_img, input_seg, input_mask, input_af = move_sample_to_device(sample, device)
+            input_img, input_seg, input_mask, input_line_mask, input_af = move_sample_to_device(sample, device)
 
             st_time = datetime.now()
             # do the forward pass
@@ -94,13 +95,13 @@ def test(net):
             # convert to arrays
             img = tensor2image(input_img.detach(), np.array(test_loader.dataset.mean), 
                 np.array(test_loader.dataset.std))
-            hm_out = torch.sigmoid(outputs['hm']).detach()
+            hm_out = torch.sigmoid(outputs['lane_hm']).detach()
             mask_out = tensor2image(hm_out, 
                 np.array([0.0 for _ in range(3)], dtype='float32'), np.array([1.0 for _ in range(3)], dtype='float32'))
             vaf_out = np.transpose(outputs['vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
             haf_out = np.transpose(outputs['haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
 
-            # decode AFs to get lane instances from the ego-center channel
+            # decode AFs to get lane instances from the center ego-lane channel
             seg_out = decodeAFs(mask_out[:, :, 1], vaf_out, haf_out, fg_thresh=128, err_thresh=5)
             ed_time = datetime.now()
 
@@ -145,8 +146,7 @@ def test(net):
     return
 
 if __name__ == "__main__":
-    heads = {'hm': 3, 'vaf': 2, 'haf': 1}
-    model = build_model(args.backbone, heads, device)
+    model = build_model(args.backbone, TUSIMPLE_HEADS, device)
 
     model = load_snapshot(model, args.snapshot, device)
     print(model)

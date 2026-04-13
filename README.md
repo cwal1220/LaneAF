@@ -8,6 +8,8 @@
 
 [Video results](https://youtube.com/playlist?list=PLUebh5NWCQUZv8IXYOVNM5SuRYQzScW5P)
 
+[Target definition](./TARGET_DEFINITION.md)
+
 ![VAF](assets/result_zoomed_VAF.png)
 ![HAF](assets/result_zoomed_HAF.png)
 

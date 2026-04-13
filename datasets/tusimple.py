@@ -15,6 +15,7 @@ import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 
 from utils.affinity_fields import generateAFs
+from utils.tusimple_targets import AREA_CHANNEL_NAMES, LINE_CHANNEL_NAMES
 import datasets.transforms as tf
 
 
@@ -89,14 +90,46 @@ def _lane_band_from_pair(seg_ids, left_id, right_id):
     return band
 
 
+def _trace_lane_edge(seg_ids, lane_id, edge):
+    edge_mask = np.zeros_like(seg_ids, dtype=np.uint8)
+    points = []
+    for row in range(seg_ids.shape[0]):
+        cols = np.where(seg_ids[row, :] == lane_id)[0]
+        if cols.size == 0:
+            continue
+        col = int(cols.min()) if edge == 'left' else int(cols.max())
+        points.append((col, row))
+
+    if len(points) == 1:
+        col, row = points[0]
+        edge_mask[row, col] = 1
+        return edge_mask
+
+    for idx in range(len(points) - 1):
+        cv2.line(edge_mask, points[idx], points[idx + 1], 1, 1)
+    return edge_mask
+
+
 def _build_ego_triplet_mask(seg_ids, ignore_label):
-    ego_left = _lane_band_from_pair(seg_ids, left_id=1, right_id=2)
-    ego = _lane_band_from_pair(seg_ids, left_id=2, right_id=3)
-    ego_right = _lane_band_from_pair(seg_ids, left_id=3, right_id=4)
-    mask = np.stack((ego_left, ego, ego_right), axis=2).astype(np.float32)
+    ego_lanes_left = _lane_band_from_pair(seg_ids, left_id=1, right_id=2)
+    ego_lanes = _lane_band_from_pair(seg_ids, left_id=2, right_id=3)
+    ego_lanes_right = _lane_band_from_pair(seg_ids, left_id=3, right_id=4)
+    mask = np.stack((ego_lanes_left, ego_lanes, ego_lanes_right), axis=2).astype(np.float32)
+    assert mask.shape[2] == len(AREA_CHANNEL_NAMES)
     ignore = seg_ids == ignore_label
     mask[ignore, :] = float(ignore_label)
     return mask
+
+
+def _build_ego_triplet_line_mask(seg_ids, ignore_label):
+    ego_lines_left = np.maximum(_trace_lane_edge(seg_ids, 1, 'right'), _trace_lane_edge(seg_ids, 2, 'left'))
+    ego_lines = np.maximum(_trace_lane_edge(seg_ids, 2, 'right'), _trace_lane_edge(seg_ids, 3, 'left'))
+    ego_lines_right = np.maximum(_trace_lane_edge(seg_ids, 3, 'right'), _trace_lane_edge(seg_ids, 4, 'left'))
+    line_mask = np.stack((ego_lines_left, ego_lines, ego_lines_right), axis=2).astype(np.float32)
+    assert line_mask.shape[2] == len(LINE_CHANNEL_NAMES)
+    ignore = seg_ids == ignore_label
+    line_mask[ignore, :] = float(ignore_label)
+    return line_mask
 
 class TuSimple(Dataset):
     def __init__(self, path, image_set='train', random_transforms=False):
@@ -153,6 +186,7 @@ class TuSimple(Dataset):
             seg = cv2.resize(seg, None, fx=self.output_scale, fy=self.output_scale, interpolation=cv2.INTER_NEAREST)
             seg_ids = seg[:, :, 0]
             mask = _build_ego_triplet_mask(seg_ids, self.ignore_label)
+            line_mask = _build_ego_triplet_line_mask(seg_ids, self.ignore_label)
             # create AFs
             seg_wo_ignore = seg_ids.copy()
             seg_wo_ignore[seg_wo_ignore == self.ignore_label] = 0
@@ -163,14 +197,15 @@ class TuSimple(Dataset):
             img = torch.from_numpy(img).permute(2, 0, 1).contiguous().float()
             seg = torch.from_numpy(seg_ids).contiguous().long().unsqueeze(0)
             mask = torch.from_numpy(mask).permute(2, 0, 1).contiguous().float()
+            line_mask = torch.from_numpy(line_mask).permute(2, 0, 1).contiguous().float()
             af = torch.from_numpy(af).permute(2, 0, 1).contiguous().float()
         else: # if labels not available, set ground truth tensors to nan values
             img, _ = self.transforms((img, img))
             # convert all outputs to torch tensors
             img = torch.from_numpy(img).permute(2, 0, 1).contiguous().float()
-            seg, mask, af = torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan'))
+            seg, mask, line_mask, af = torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan'))
 
-        return img, seg, mask, af
+        return img, seg, mask, line_mask, af
 
     def __len__(self):
         return len(self.img_list)
