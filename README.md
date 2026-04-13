@@ -104,6 +104,10 @@ uv run python train_culane.py --dataset-dir=data/CULane --backbone=dla34 --devic
 ```shell
 uv run python train_culane.py --dataset-dir=data/CULane --backbone=dla34 --device=cuda
 ```
+- On this machine, the full CULane training command is:
+```shell
+uv run python train_culane.py --dataset-dir=/home/chan/LaneAF/data/CULane_full --backbone=dla34 --device=cuda --random-transforms
+```
 
 5) Monitor training with TensorBoard:
 ```shell
@@ -179,6 +183,11 @@ LaneAF models can be trained on the CULane dataset as follows:
 uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=erfnet --device=mps --random-transforms
 ```
 Other supported backbones are `enet` and `dla34`.
+Examples:
+```shell
+uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=dla34 --device=mps --random-transforms
+uv run python train_culane.py --dataset-dir=/path/to/CULane/ --backbone=dla34 --device=cuda --random-transforms
+```
 
 Config files, logs, results and snapshots from running the above scripts will be stored in the `LaneAF/experiments/culane` folder by default.
 `train_culane.py` also writes TensorBoard event files under `output_dir/tensorboard`.
