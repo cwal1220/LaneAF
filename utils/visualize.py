@@ -29,3 +29,21 @@ def create_viz(img, seg, mask, vaf, haf):
         img = cv2.arrowedLine(img, (c*scale, r*scale),(int(c*scale+vaf[r, c, 0]*scale*0.75), 
             int(r*scale+vaf[r, c, 1]*scale*0.5)), seg_color[r, c, :].tolist(), 1, tipLength=0.4)
     return img
+
+
+def draw_instance_lines(img, instance_maps, colors, scale=8, thickness=2):
+    img = np.ascontiguousarray(img, dtype=np.uint8)
+
+    for instance_map, color in zip(instance_maps, colors):
+        lane_ids = np.unique(instance_map[instance_map > 0])
+        for lane_id in lane_ids:
+            pts = []
+            for row in range(instance_map.shape[0]):
+                cols = np.where(instance_map[row, :] == lane_id)[0]
+                if cols.size == 0:
+                    continue
+                pts.append((int(round(cols.mean())) * scale, row * scale))
+            if len(pts) >= 2:
+                pts = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.polylines(img, [pts], False, color, thickness, cv2.LINE_AA)
+    return img

@@ -6,6 +6,8 @@ TUSIMPLE_HEADS = {
     "line_hm": len(LINE_CHANNEL_NAMES),
     "vaf": 2,
     "haf": 1,
+    "line_vaf": len(LINE_CHANNEL_NAMES) * 2,
+    "line_haf": len(LINE_CHANNEL_NAMES),
 }
 
 

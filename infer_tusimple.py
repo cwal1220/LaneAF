@@ -16,7 +16,7 @@ from utils.affinity_fields import decodeAFs
 from utils.metrics import match_multi_class, LaneEval
 from utils.runtime import build_model, load_snapshot, move_sample_to_device, resolve_device
 from utils.tusimple_targets import TUSIMPLE_HEADS
-from utils.visualize import tensor2image, create_viz
+from utils.visualize import tensor2image, create_viz, draw_instance_lines
 
 
 parser = argparse.ArgumentParser('Options for inference with LaneAF models in PyTorch...')
@@ -78,6 +78,23 @@ kwargs = {'batch_size': args.batch_size, 'shuffle': False, 'num_workers': 1, 'pi
 test_loader = DataLoader(TuSimple(args.dataset_dir, args.split, False), **kwargs)
 
 
+LINE_VIZ_COLORS = [
+    (255, 180, 80),
+    (255, 255, 80),
+    (80, 255, 255),
+]
+
+
+def decode_line_instances(line_hm_out, line_vaf_out, line_haf_out):
+    instances = []
+    for idx in range(line_hm_out.shape[2]):
+        bw = np.ascontiguousarray(line_hm_out[:, :, idx], dtype=np.uint8)
+        vaf = line_vaf_out[:, :, 2 * idx:2 * idx + 2]
+        haf = line_haf_out[:, :, idx]
+        instances.append(decodeAFs(bw, vaf, haf, fg_thresh=128, err_thresh=5))
+    return instances
+
+
 # test function
 def test(net):
     net.eval()
@@ -86,7 +103,7 @@ def test(net):
 
     with torch.no_grad():
         for b_idx, sample in enumerate(test_loader):
-            input_img, input_seg, input_mask, input_line_mask, input_af = move_sample_to_device(sample, device)
+            input_img, input_seg, input_mask, input_line_mask, input_af, input_line_af = move_sample_to_device(sample, device)
 
             st_time = datetime.now()
             # do the forward pass
@@ -98,11 +115,20 @@ def test(net):
             hm_out = torch.sigmoid(outputs['lane_hm']).detach()
             mask_out = tensor2image(hm_out, 
                 np.array([0.0 for _ in range(3)], dtype='float32'), np.array([1.0 for _ in range(3)], dtype='float32'))
+            line_hm_out = torch.sigmoid(outputs['line_hm']).detach()
+            line_mask_out = tensor2image(
+                line_hm_out,
+                np.array([0.0 for _ in range(3)], dtype='float32'),
+                np.array([1.0 for _ in range(3)], dtype='float32'),
+            )
             vaf_out = np.transpose(outputs['vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
             haf_out = np.transpose(outputs['haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
+            line_vaf_out = np.transpose(outputs['line_vaf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
+            line_haf_out = np.transpose(outputs['line_haf'][0, :, :, :].detach().cpu().float().numpy(), (1, 2, 0))
 
             # decode AFs to get lane instances from the center ego-lane channel
             seg_out = decodeAFs(mask_out[:, :, 1], vaf_out, haf_out, fg_thresh=128, err_thresh=5)
+            line_instances = decode_line_instances(line_mask_out, line_vaf_out, line_haf_out)
             ed_time = datetime.now()
 
             if torch.any(torch.isnan(input_seg)):
@@ -127,6 +153,7 @@ def test(net):
             # create video visualization
             if args.save_viz:
                 img_out = create_viz(img, seg_out.astype(np.uint8), mask_out, vaf_out, haf_out)
+                img_out = draw_instance_lines(img_out, line_instances, LINE_VIZ_COLORS, scale=4, thickness=2)
 
                 if out_vid is None:
                     out_vid = cv2.VideoWriter(os.path.join(args.output_dir, 'out.mkv'), 

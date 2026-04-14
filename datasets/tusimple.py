@@ -110,6 +110,26 @@ def _trace_lane_edge(seg_ids, lane_id, edge):
     return edge_mask
 
 
+def _trace_lane_edge_instance(seg_ids, lane_id, edge, instance_id):
+    edge_mask = np.zeros_like(seg_ids, dtype=np.uint8)
+    points = []
+    for row in range(seg_ids.shape[0]):
+        cols = np.where(seg_ids[row, :] == lane_id)[0]
+        if cols.size == 0:
+            continue
+        col = int(cols.min()) if edge == 'left' else int(cols.max())
+        points.append((col, row))
+
+    if len(points) == 1:
+        col, row = points[0]
+        edge_mask[row, col] = instance_id
+        return edge_mask
+
+    for idx in range(len(points) - 1):
+        cv2.line(edge_mask, points[idx], points[idx + 1], instance_id, 1)
+    return edge_mask
+
+
 def _build_ego_triplet_mask(seg_ids, ignore_label):
     ego_lanes_left = _lane_band_from_pair(seg_ids, left_id=1, right_id=2)
     ego_lanes = _lane_band_from_pair(seg_ids, left_id=2, right_id=3)
@@ -130,6 +150,25 @@ def _build_ego_triplet_line_mask(seg_ids, ignore_label):
     ignore = seg_ids == ignore_label
     line_mask[ignore, :] = float(ignore_label)
     return line_mask
+
+
+def _build_ego_triplet_line_instances(seg_ids, ignore_label):
+    ego_lines_left = np.maximum(
+        _trace_lane_edge_instance(seg_ids, 1, 'right', 1),
+        _trace_lane_edge_instance(seg_ids, 2, 'left', 2),
+    )
+    ego_lines = np.maximum(
+        _trace_lane_edge_instance(seg_ids, 2, 'right', 1),
+        _trace_lane_edge_instance(seg_ids, 3, 'left', 2),
+    )
+    ego_lines_right = np.maximum(
+        _trace_lane_edge_instance(seg_ids, 3, 'right', 1),
+        _trace_lane_edge_instance(seg_ids, 4, 'left', 2),
+    )
+    line_instances = np.stack((ego_lines_left, ego_lines, ego_lines_right), axis=2).astype(np.int64)
+    ignore = seg_ids == ignore_label
+    line_instances[ignore, :] = ignore_label
+    return line_instances
 
 class TuSimple(Dataset):
     def __init__(self, path, image_set='train', random_transforms=False):
@@ -187,11 +226,24 @@ class TuSimple(Dataset):
             seg_ids = seg[:, :, 0]
             mask = _build_ego_triplet_mask(seg_ids, self.ignore_label)
             line_mask = _build_ego_triplet_line_mask(seg_ids, self.ignore_label)
+            line_instances = _build_ego_triplet_line_instances(seg_ids, self.ignore_label)
             # create AFs
             seg_wo_ignore = seg_ids.copy()
             seg_wo_ignore[seg_wo_ignore == self.ignore_label] = 0
             vaf, haf = generateAFs(seg_wo_ignore.astype(np.long), viz=False)
             af = np.concatenate((vaf, haf[:, :, 0:1]), axis=2)
+            line_vaf = []
+            line_haf = []
+            for ch in range(line_instances.shape[2]):
+                inst = line_instances[:, :, ch].copy()
+                inst[inst == self.ignore_label] = 0
+                vaf_ch, haf_ch = generateAFs(inst.astype(np.long), viz=False)
+                line_vaf.append(vaf_ch)
+                line_haf.append(haf_ch[:, :, 0:1])
+            line_af = np.concatenate(
+                [np.concatenate(line_vaf, axis=2), np.concatenate(line_haf, axis=2)],
+                axis=2,
+            )
 
             # convert all outputs to torch tensors
             img = torch.from_numpy(img).permute(2, 0, 1).contiguous().float()
@@ -199,13 +251,14 @@ class TuSimple(Dataset):
             mask = torch.from_numpy(mask).permute(2, 0, 1).contiguous().float()
             line_mask = torch.from_numpy(line_mask).permute(2, 0, 1).contiguous().float()
             af = torch.from_numpy(af).permute(2, 0, 1).contiguous().float()
+            line_af = torch.from_numpy(line_af).permute(2, 0, 1).contiguous().float()
         else: # if labels not available, set ground truth tensors to nan values
             img, _ = self.transforms((img, img))
             # convert all outputs to torch tensors
             img = torch.from_numpy(img).permute(2, 0, 1).contiguous().float()
-            seg, mask, line_mask, af = torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan'))
+            seg, mask, line_mask, af, line_af = torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan')), torch.tensor(float('nan'))
 
-        return img, seg, mask, line_mask, af
+        return img, seg, mask, line_mask, af, line_af
 
     def __len__(self):
         return len(self.img_list)

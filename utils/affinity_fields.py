@@ -107,7 +107,7 @@ def decodeAFs(BW, VAF, HAF, fg_thresh=128, err_thresh=5, viz=False):
         # parse vertically
         # assign existing lanes
         assigned = [False for _ in clusters]
-        C = np.Inf*np.ones((len(lane_end_pts), len(clusters)), dtype=np.float64)
+        C = np.inf*np.ones((len(lane_end_pts), len(clusters)), dtype=np.float64)
         for r, pts in enumerate(lane_end_pts): # for each end point in an active lane
             for c, cluster in enumerate(clusters):
                 if len(cluster) == 0:
@@ -116,7 +116,12 @@ def decodeAFs(BW, VAF, HAF, fg_thresh=128, err_thresh=5, viz=False):
                 cluster_mean = np.array([[np.mean(cluster), row]], dtype=np.float32)
                 # get vafs from lane end points
                 vafs = np.array([VAF[int(round(x[1])), int(round(x[0])), :] for x in pts], dtype=np.float32)
-                vafs = vafs / np.linalg.norm(vafs, axis=1, keepdims=True)
+                vaf_norms = np.linalg.norm(vafs, axis=1, keepdims=True)
+                nonzero = vaf_norms.squeeze(1) > 1e-6
+                if np.any(nonzero):
+                    vafs[nonzero] = vafs[nonzero] / vaf_norms[nonzero]
+                if np.any(~nonzero):
+                    vafs[~nonzero] = 0.0
                 # get predicted cluster center by adding vafs
                 pred_points = pts + vafs*np.linalg.norm(pts - cluster_mean, axis=1, keepdims=True)
                 # get error between prediceted cluster center and actual cluster center
