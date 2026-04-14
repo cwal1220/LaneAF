@@ -169,6 +169,16 @@ This will generate outputs in the TuSimple format and also produce benchmark met
 |  ERFNet  |  94.9465 |  95.2978 | 0.0550 | 0.0465 |
 |   ENet   |  92.8905 |  94.7271 | 0.0885 | 0.0560 |
 
+### Custom Triplet Target Results
+For the custom TuSimple supervision used in this branch, see [TUSIMPLE_CUSTOM_RESULTS.md](/home/chan/LaneAF/TUSIMPLE_CUSTOM_RESULTS.md:1).
+
+These are **internal validation metrics** for the custom `lane_hm + line_hm + vaf + haf` target definition, not the official TuSimple benchmark numbers above.
+
+| Backbone | Epoch | Val loss | Val area loss | Val line loss | Val lane accuracy | Val lane F1 | Val line F1 |
+|:--|--:|--:|--:|--:|--:|--:|--:|
+| ERFNet | 10 | 4.16 | 1.73 | 2.39 | 0.9736 | 0.8782 | n/a |
+| DLA-34 | 22 | 3.83 | 1.59 | 2.21 | 0.9832 | 0.9182 | 0.5647 |
+
 ## CULane
 The entire [CULane dataset](https://xingangpan.github.io/projects/CULane.html) should be downloaded and organized as follows:
 ```plain
