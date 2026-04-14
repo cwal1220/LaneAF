@@ -77,6 +77,28 @@ def compute_segmentation_losses(output_map, input_mask, ignore_label, channel_na
     return total, channel_losses
 
 
+def compute_segmentation_metrics(output_map, target_map, ignore_label, channel_names):
+    pred = torch.sigmoid(output_map).detach().cpu().numpy()
+    target = target_map.detach().cpu().numpy()
+
+    valid = target != ignore_label
+    overall_acc = accuracy_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64))
+    overall_f1 = f1_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64), zero_division=1)
+
+    channel_f1 = {}
+    for idx, name in enumerate(channel_names):
+        target_ch = target[:, idx:idx+1, :, :]
+        pred_ch = pred[:, idx:idx+1, :, :]
+        valid_ch = target_ch != ignore_label
+        channel_f1[name] = f1_score(
+            (target_ch[valid_ch] > 0.5).astype(np.int64),
+            (pred_ch[valid_ch] > 0.5).astype(np.int64),
+            zero_division=1,
+        )
+
+    return overall_acc, overall_f1, channel_f1
+
+
 def setup():
     global args, device, train_loader, val_loader, best_f1, f_log, tb_writer
 
@@ -119,9 +141,11 @@ def setup():
 
 # training function
 def train(net, epoch):
-    epoch_loss_seg, epoch_loss_line, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1 = list(), list(), list(), list(), list(), list(), list()
+    epoch_loss_seg, epoch_loss_line, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1, epoch_line_f1 = list(), list(), list(), list(), list(), list(), list(), list()
     epoch_loss_seg_channels = {name: [] for name in AREA_CHANNEL_NAMES}
     epoch_loss_line_channels = {name: [] for name in LINE_CHANNEL_NAMES}
+    epoch_f1_seg_channels = {name: [] for name in AREA_CHANNEL_NAMES}
+    epoch_f1_line_channels = {name: [] for name in LINE_CHANNEL_NAMES}
     net.train()
     for b_idx, sample in enumerate(train_loader):
         input_img, input_seg, input_mask, input_line_mask, input_af = move_sample_to_device(sample, device)
@@ -138,24 +162,26 @@ def train(net, epoch):
         loss_line, loss_line_channels = compute_segmentation_losses(outputs['line_hm'], input_line_mask, train_loader.dataset.ignore_label, LINE_CHANNEL_NAMES)
         loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], af_valid_mask)
         loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], af_valid_mask)
-        pred = torch.sigmoid(outputs['lane_hm']).detach().cpu().numpy()
-        target = input_mask.detach().cpu().numpy()
-        valid = target != train_loader.dataset.ignore_label
-        train_acc = accuracy_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64))
-        train_f1 = f1_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64), zero_division=1)
+        train_acc, train_f1, train_seg_f1_channels = compute_segmentation_metrics(
+            outputs['lane_hm'], input_mask, train_loader.dataset.ignore_label, AREA_CHANNEL_NAMES)
+        _, train_line_f1, train_line_f1_channels = compute_segmentation_metrics(
+            outputs['line_hm'], input_line_mask, train_loader.dataset.ignore_label, LINE_CHANNEL_NAMES)
 
         epoch_loss_seg.append(loss_seg.item())
         epoch_loss_line.append(loss_line.item())
         for name in AREA_CHANNEL_NAMES:
             epoch_loss_seg_channels[name].append(loss_seg_channels[name].item())
+            epoch_f1_seg_channels[name].append(train_seg_f1_channels[name])
         for name in LINE_CHANNEL_NAMES:
             epoch_loss_line_channels[name].append(loss_line_channels[name].item())
+            epoch_f1_line_channels[name].append(train_line_f1_channels[name])
         epoch_loss_vaf.append(loss_vaf.item())
         epoch_loss_haf.append(loss_haf.item())
         loss = loss_seg + loss_line + loss_vaf + loss_haf
         epoch_loss.append(loss.item())
         epoch_acc.append(train_acc)
         epoch_f1.append(train_f1)
+        epoch_line_f1.append(train_line_f1)
 
         loss.backward()
         optimizer.step()
@@ -176,8 +202,13 @@ def train(net, epoch):
             tb_writer.add_scalar('train_step/loss_vaf', loss_vaf.item(), global_step)
             tb_writer.add_scalar('train_step/loss_haf', loss_haf.item(), global_step)
             tb_writer.add_scalar('train_step/loss_total', loss.item(), global_step)
-            tb_writer.add_scalar('train_step/accuracy', train_acc, global_step)
-            tb_writer.add_scalar('train_step/f1', train_f1, global_step)
+            tb_writer.add_scalar('train_step/lane_accuracy', train_acc, global_step)
+            tb_writer.add_scalar('train_step/lane_f1', train_f1, global_step)
+            for name in AREA_CHANNEL_NAMES:
+                tb_writer.add_scalar(f'train_step/lane_f1_{name}', train_seg_f1_channels[name], global_step)
+            tb_writer.add_scalar('train_step/line_f1', train_line_f1, global_step)
+            for name in LINE_CHANNEL_NAMES:
+                tb_writer.add_scalar(f'train_step/line_f1_{name}', train_line_f1_channels[name], global_step)
             f_log.flush()
 
     scheduler.step()
@@ -191,6 +222,9 @@ def train(net, epoch):
     avg_loss = mean(epoch_loss)
     avg_acc = mean(epoch_acc)
     avg_f1 = mean(epoch_f1)
+    avg_line_f1 = mean(epoch_line_f1)
+    avg_f1_seg_channels = {name: mean(epoch_f1_seg_channels[name]) for name in AREA_CHANNEL_NAMES}
+    avg_f1_line_channels = {name: mean(epoch_f1_line_channels[name]) for name in LINE_CHANNEL_NAMES}
     print("\n------------------------ Training metrics ------------------------")
     f_log.write("\n------------------------ Training metrics ------------------------\n")
     print("Average area loss for epoch = {:.2f}".format(avg_loss_seg))
@@ -211,8 +245,16 @@ def train(net, epoch):
     f_log.write("Average loss for epoch = {:.2f}\n".format(avg_loss))
     print("Average accuracy for epoch = {:.4f}".format(avg_acc))
     f_log.write("Average accuracy for epoch = {:.4f}\n".format(avg_acc))
-    print("Average F1 score for epoch = {:.4f}".format(avg_f1))
-    f_log.write("Average F1 score for epoch = {:.4f}\n".format(avg_f1))
+    print("Average lane F1 score for epoch = {:.4f}".format(avg_f1))
+    f_log.write("Average lane F1 score for epoch = {:.4f}\n".format(avg_f1))
+    for name in AREA_CHANNEL_NAMES:
+        print("Average {} lane F1 for epoch = {:.4f}".format(name, avg_f1_seg_channels[name]))
+        f_log.write("Average {} lane F1 for epoch = {:.4f}\n".format(name, avg_f1_seg_channels[name]))
+    print("Average line F1 score for epoch = {:.4f}".format(avg_line_f1))
+    f_log.write("Average line F1 score for epoch = {:.4f}\n".format(avg_line_f1))
+    for name in LINE_CHANNEL_NAMES:
+        print("Average {} line F1 for epoch = {:.4f}".format(name, avg_f1_line_channels[name]))
+        f_log.write("Average {} line F1 for epoch = {:.4f}\n".format(name, avg_f1_line_channels[name]))
     print("------------------------------------------------------------------\n")
     f_log.write("------------------------------------------------------------------\n\n")
     tb_writer.add_scalar('train_epoch/loss_area', avg_loss_seg, epoch)
@@ -224,8 +266,13 @@ def train(net, epoch):
     tb_writer.add_scalar('train_epoch/loss_vaf', avg_loss_vaf, epoch)
     tb_writer.add_scalar('train_epoch/loss_haf', avg_loss_haf, epoch)
     tb_writer.add_scalar('train_epoch/loss_total', avg_loss, epoch)
-    tb_writer.add_scalar('train_epoch/accuracy', avg_acc, epoch)
-    tb_writer.add_scalar('train_epoch/f1', avg_f1, epoch)
+    tb_writer.add_scalar('train_epoch/lane_accuracy', avg_acc, epoch)
+    tb_writer.add_scalar('train_epoch/lane_f1', avg_f1, epoch)
+    for name in AREA_CHANNEL_NAMES:
+        tb_writer.add_scalar(f'train_epoch/lane_f1_{name}', avg_f1_seg_channels[name], epoch)
+    tb_writer.add_scalar('train_epoch/line_f1', avg_line_f1, epoch)
+    for name in LINE_CHANNEL_NAMES:
+        tb_writer.add_scalar(f'train_epoch/line_f1_{name}', avg_f1_line_channels[name], epoch)
     f_log.flush()
     
     return net, avg_loss_seg, avg_loss_line, avg_loss_vaf, avg_loss_haf, avg_loss, avg_acc, avg_f1
@@ -233,9 +280,11 @@ def train(net, epoch):
 # validation function
 def val(net, epoch):
     global best_f1
-    epoch_loss_seg, epoch_loss_line, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1 = list(), list(), list(), list(), list(), list(), list()
+    epoch_loss_seg, epoch_loss_line, epoch_loss_vaf, epoch_loss_haf, epoch_loss, epoch_acc, epoch_f1, epoch_line_f1 = list(), list(), list(), list(), list(), list(), list(), list()
     epoch_loss_seg_channels = {name: [] for name in AREA_CHANNEL_NAMES}
     epoch_loss_line_channels = {name: [] for name in LINE_CHANNEL_NAMES}
+    epoch_f1_seg_channels = {name: [] for name in AREA_CHANNEL_NAMES}
+    epoch_f1_line_channels = {name: [] for name in LINE_CHANNEL_NAMES}
     net.eval()
 
     with torch.no_grad():
@@ -251,24 +300,26 @@ def val(net, epoch):
             loss_line, loss_line_channels = compute_segmentation_losses(outputs['line_hm'], input_line_mask, val_loader.dataset.ignore_label, LINE_CHANNEL_NAMES)
             loss_vaf = 0.5*criterion_reg(outputs['vaf'], input_af[:, :2, :, :], af_valid_mask)
             loss_haf = 0.5*criterion_reg(outputs['haf'], input_af[:, 2:3, :, :], af_valid_mask)
-            pred = torch.sigmoid(outputs['lane_hm']).detach().cpu().numpy()
-            target = input_mask.detach().cpu().numpy()
-            valid = target != val_loader.dataset.ignore_label
-            val_acc = accuracy_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64))
-            val_f1 = f1_score((target[valid] > 0.5).astype(np.int64), (pred[valid] > 0.5).astype(np.int64), zero_division=1)
+            val_acc, val_f1, val_seg_f1_channels = compute_segmentation_metrics(
+                outputs['lane_hm'], input_mask, val_loader.dataset.ignore_label, AREA_CHANNEL_NAMES)
+            _, val_line_f1, val_line_f1_channels = compute_segmentation_metrics(
+                outputs['line_hm'], input_line_mask, val_loader.dataset.ignore_label, LINE_CHANNEL_NAMES)
 
             epoch_loss_seg.append(loss_seg.item())
             epoch_loss_line.append(loss_line.item())
             for name in AREA_CHANNEL_NAMES:
                 epoch_loss_seg_channels[name].append(loss_seg_channels[name].item())
+                epoch_f1_seg_channels[name].append(val_seg_f1_channels[name])
             for name in LINE_CHANNEL_NAMES:
                 epoch_loss_line_channels[name].append(loss_line_channels[name].item())
+                epoch_f1_line_channels[name].append(val_line_f1_channels[name])
             epoch_loss_vaf.append(loss_vaf.item())
             epoch_loss_haf.append(loss_haf.item())
             loss = loss_seg + loss_line + loss_vaf + loss_haf
             epoch_loss.append(loss.item())
             epoch_acc.append(val_acc)
             epoch_f1.append(val_f1)
+            epoch_line_f1.append(val_line_f1)
 
             print('Done with image {} out of {}...'.format(min(args.batch_size*(b_idx+1), len(val_loader.dataset)), len(val_loader.dataset)))
 
@@ -282,6 +333,9 @@ def val(net, epoch):
     avg_loss = mean(epoch_loss)
     avg_acc = mean(epoch_acc)
     avg_f1 = mean(epoch_f1)
+    avg_line_f1 = mean(epoch_line_f1)
+    avg_f1_seg_channels = {name: mean(epoch_f1_seg_channels[name]) for name in AREA_CHANNEL_NAMES}
+    avg_f1_line_channels = {name: mean(epoch_f1_line_channels[name]) for name in LINE_CHANNEL_NAMES}
     print("\n------------------------ Validation metrics ------------------------")
     f_log.write("\n------------------------ Validation metrics ------------------------\n")
     print("Average area loss for epoch = {:.2f}".format(avg_loss_seg))
@@ -302,8 +356,16 @@ def val(net, epoch):
     f_log.write("Average loss for epoch = {:.2f}\n".format(avg_loss))
     print("Average accuracy for epoch = {:.4f}".format(avg_acc))
     f_log.write("Average accuracy for epoch = {:.4f}\n".format(avg_acc))
-    print("Average F1 score for epoch = {:.4f}".format(avg_f1))
-    f_log.write("Average F1 score for epoch = {:.4f}\n".format(avg_f1))
+    print("Average lane F1 score for epoch = {:.4f}".format(avg_f1))
+    f_log.write("Average lane F1 score for epoch = {:.4f}\n".format(avg_f1))
+    for name in AREA_CHANNEL_NAMES:
+        print("Average {} lane F1 for epoch = {:.4f}".format(name, avg_f1_seg_channels[name]))
+        f_log.write("Average {} lane F1 for epoch = {:.4f}\n".format(name, avg_f1_seg_channels[name]))
+    print("Average line F1 score for epoch = {:.4f}".format(avg_line_f1))
+    f_log.write("Average line F1 score for epoch = {:.4f}\n".format(avg_line_f1))
+    for name in LINE_CHANNEL_NAMES:
+        print("Average {} line F1 for epoch = {:.4f}".format(name, avg_f1_line_channels[name]))
+        f_log.write("Average {} line F1 for epoch = {:.4f}\n".format(name, avg_f1_line_channels[name]))
     print("--------------------------------------------------------------------\n")
     f_log.write("--------------------------------------------------------------------\n\n")
     tb_writer.add_scalar('val_epoch/loss_area', avg_loss_seg, epoch)
@@ -315,8 +377,13 @@ def val(net, epoch):
     tb_writer.add_scalar('val_epoch/loss_vaf', avg_loss_vaf, epoch)
     tb_writer.add_scalar('val_epoch/loss_haf', avg_loss_haf, epoch)
     tb_writer.add_scalar('val_epoch/loss_total', avg_loss, epoch)
-    tb_writer.add_scalar('val_epoch/accuracy', avg_acc, epoch)
-    tb_writer.add_scalar('val_epoch/f1', avg_f1, epoch)
+    tb_writer.add_scalar('val_epoch/lane_accuracy', avg_acc, epoch)
+    tb_writer.add_scalar('val_epoch/lane_f1', avg_f1, epoch)
+    for name in AREA_CHANNEL_NAMES:
+        tb_writer.add_scalar(f'val_epoch/lane_f1_{name}', avg_f1_seg_channels[name], epoch)
+    tb_writer.add_scalar('val_epoch/line_f1', avg_line_f1, epoch)
+    for name in LINE_CHANNEL_NAMES:
+        tb_writer.add_scalar(f'val_epoch/line_f1_{name}', avg_f1_line_channels[name], epoch)
     f_log.flush()
 
     # now save the model if it has a better F1 score than the best model seen so forward
